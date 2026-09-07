@@ -33,11 +33,7 @@ library BeliefState {
     /// @notice Scales the belief by reserve adequacy, per eq (5.2).
     /// @dev Graceful degradation: as the reserve drains the mechanism turns itself
     ///      off rather than reverting, so the pool degrades to a plain v4 pool.
-    function scaleForReserve(int256 deltaX64, uint256 reserve, uint256 reserveTarget)
-        internal
-        pure
-        returns (int256)
-    {
+    function scaleForReserve(int256 deltaX64, uint256 reserve, uint256 reserveTarget) internal pure returns (int256) {
         if (reserveTarget == 0 || reserve >= reserveTarget) return deltaX64;
         return (deltaX64 * int256(reserve)) / int256(reserveTarget);
     }

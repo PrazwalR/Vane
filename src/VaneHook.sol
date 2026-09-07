@@ -70,12 +70,7 @@ contract VaneHook is IHooks {
         return IHooks.beforeInitialize.selector;
     }
 
-    function afterInitialize(address, PoolKey calldata, uint160, int24)
-        external
-        pure
-        override
-        returns (bytes4)
-    {
+    function afterInitialize(address, PoolKey calldata, uint160, int24) external pure override returns (bytes4) {
         return IHooks.afterInitialize.selector;
     }
 
@@ -123,9 +118,8 @@ contract VaneHook is IHooks {
     /// @dev Computes the signed specified-token adjustment for this swap.
     ///      Positive means the hook takes value, negative means it gives value.
     function _computeOffset(SwapParams calldata params, int256 d) internal pure returns (int128) {
-        uint256 magnitude = params.amountSpecified < 0
-            ? uint256(-params.amountSpecified)
-            : uint256(params.amountSpecified);
+        uint256 magnitude =
+            params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
 
         uint256 amount = OffsetDelta.offsetAmount(magnitude, d);
         if (amount == 0) return 0;
@@ -176,12 +170,12 @@ contract VaneHook is IHooks {
         return (IHooks.afterAddLiquidity.selector, BalanceDelta.wrap(0));
     }
 
-    function beforeRemoveLiquidity(
-        address,
-        PoolKey calldata,
-        ModifyLiquidityParams calldata,
-        bytes calldata
-    ) external pure override returns (bytes4) {
+    function beforeRemoveLiquidity(address, PoolKey calldata, ModifyLiquidityParams calldata, bytes calldata)
+        external
+        pure
+        override
+        returns (bytes4)
+    {
         return IHooks.beforeRemoveLiquidity.selector;
     }
 

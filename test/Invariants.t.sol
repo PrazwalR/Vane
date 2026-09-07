@@ -57,9 +57,12 @@ contract InvariantsTest is Test, Deployers {
 
     /// @notice Invariant 1: beforeSwap must not revert for any well-formed swap, at any
     ///         belief within bounds, in either direction and either exactness mode.
-    function testFuzz_Invariant_BeforeSwapNeverReverts(int256 rawDelta, uint128 rawAmount, bool zeroForOne, bool exactInput)
-        public
-    {
+    function testFuzz_Invariant_BeforeSwapNeverReverts(
+        int256 rawDelta,
+        uint128 rawAmount,
+        bool zeroForOne,
+        bool exactInput
+    ) public {
         int256 d = bound(rawDelta, -DELTA_MAX, DELTA_MAX);
         // Keep the notional well inside available liquidity so the failure under test is
         // the hook, not the pool running out of range.
