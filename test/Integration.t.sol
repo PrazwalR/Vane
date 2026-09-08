@@ -196,6 +196,27 @@ contract IntegrationTest is Test, Deployers {
         assertLe(kappaSparse, kappaDense, "a long gap must not inflate kappa");
     }
 
+    /// @notice A long idle period followed by a violent move must not brick the pool.
+    /// @dev End-to-end regression for the saturation fix in HorizonVariance. The horizon
+    ///      clamp scales with elapsed blocks, so a long gap raises the ceiling on r_k far
+    ///      enough that squaring it overflowed a uint64 and reverted inside afterSwap.
+    ///      Every subsequent swap would then revert too, which is unrecoverable.
+    function test_Exploit_LongIdleThenViolentMoveDoesNotBrickPool() public {
+        _swap(true, -1 ether);
+
+        // Idle far past the horizon, then move the price hard in one go.
+        vm.roll(block.number + 5000);
+        _swap(true, -400 ether);
+
+        // The pool must still be usable afterwards.
+        vm.roll(block.number + 1);
+        _swap(false, -1 ether);
+        vm.roll(block.number + 1);
+        _swap(true, -1 ether);
+
+        assertGt(hook.poolState(id).varOneX32, 0, "estimator must survive the excursion");
+    }
+
     /// @notice The belief must emerge from one-sided flow with no manual intervention.
     ///         This is the whole mechanism running unaided.
     function test_Belief_EmergesFromOneSidedFlow() public {

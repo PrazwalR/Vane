@@ -169,6 +169,27 @@ contract VarianceTest is Test {
         assertLt(vr, Q64x64.ONE_X32, "mean reverting returns must give VR < 1");
     }
 
+    /// @notice Var(r_k) must saturate rather than revert on an extreme horizon return.
+    /// @dev Regression for a bricking bug. The horizon clamp is maxTickDelta * horizon,
+    ///      and the horizon is the blocks that actually elapsed, so a pool that sits idle
+    ///      then moves hard produces a large r_k. Squaring it and shifting to Q32.32
+    ///      overflows a uint64 once r_k passes 65,535 ticks, which the clamp permits from
+    ///      33 elapsed blocks upward at maxTickDelta = 2000. Reverting there would revert
+    ///      afterSwap, and a pool whose afterSwap always reverts cannot be swapped at all.
+    function test_VarK_SaturatesRatherThanRevertingOnExtremeReturn() public pure {
+        // 40,000 ticks of real move after a 100-block gap: r_k^2 << 32 exceeds uint64.
+        uint64 result = HorizonVariance.updateVarK(0, 40_000, -40_000, MAX_TICK_DELTA, 100, LAMBDA_X32);
+        assertGt(result, 0, "an extreme move must still register");
+    }
+
+    /// @notice The same bound on the per-block estimator, for symmetry.
+    function testFuzz_VarK_NeverReverts(int24 tickNow, int24 checkpointTick, uint16 horizon) public pure {
+        uint16 h = uint16(bound(uint256(horizon), 1, type(uint16).max));
+        uint64 result =
+            HorizonVariance.updateVarK(type(uint64).max / 2, tickNow, checkpointTick, MAX_TICK_DELTA, h, LAMBDA_X32);
+        assertLe(result, type(uint64).max, "varK must stay in range without reverting");
+    }
+
     /// @notice sigma must never revert and never overflow across the whole legal domain.
     function testFuzz_Sigma_NeverRevertsOrOverflows(uint64 varK, uint16 k) public pure {
         uint16 horizon = uint16(bound(uint256(k), 1, 10000));

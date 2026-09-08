@@ -5,7 +5,16 @@ import {Q64x64} from "./Q64x64.sol";
 
 /// @title HorizonVariance
 /// @notice Per-block and k-block return variance, per spec sections 3.1 and 3.4.
-/// @dev Ticks are log prices. A tick difference is a log return up to the constant
+/// @dev Both EWMAs SATURATE at the type bound rather than reverting. The horizon clamp
+///      is maxTickDelta * horizon and the horizon is the blocks that actually elapsed, so
+///      a pool that sits idle and then moves hard can produce an r_k above 65,535 ticks,
+///      whose square shifted to Q32.32 exceeds a uint64. Reverting there would revert
+///      afterSwap, and a pool whose afterSwap always reverts cannot be swapped at all.
+///      A saturated variance is an estimate that has lost resolution at the top of its
+///      range, which the kappa and delta clamps already bound; a bricked pool is
+///      unrecoverable. Regression: test_VarK_SaturatesRatherThanRevertingOnExtremeReturn.
+///
+///      Ticks are log prices. A tick difference is a log return up to the constant
 ///      ln(1.0001), so every estimate here is integer arithmetic with no ln or exp
 ///      and no precision loss. Variance is carried in squared ticks at Q32.32 and
 ///      converted to log-price units only at the boundary, in sigmaX64.
@@ -46,7 +55,7 @@ library HorizonVariance {
     {
         uint256 sample = clampedSquare(tickNow, tickPrev, maxTickDelta);
         uint256 next = Q64x64.ewmaX32(uint256(varOneX32), sample << 32, uint256(lambdaX32));
-        return Q64x64.toUint64(next);
+        return next > type(uint64).max ? type(uint64).max : uint64(next);
     }
 
     /// @notice Folds one k-block observation into the r_k variance EWMA.
@@ -78,7 +87,7 @@ library HorizonVariance {
         uint256 sample = magnitude * magnitude;
 
         uint256 next = Q64x64.ewmaX32(uint256(varKX32), sample << 32, uint256(lambdaX32));
-        return Q64x64.toUint64(next);
+        return next > type(uint64).max ? type(uint64).max : uint64(next);
     }
 
     /// @notice Fundamental log-volatility sigma, per eq (3.3): sigma^2 = Var(r_k) / k.
