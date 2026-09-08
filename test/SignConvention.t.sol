@@ -11,8 +11,11 @@ import {Currency} from "v4-core/types/Currency.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {VaneHook} from "../src/VaneHook.sol";
+import {VaneHookHarness} from "./utils/VaneHookHarness.sol";
+import {Fixtures} from "./utils/Fixtures.sol";
 import {OffsetDelta} from "../src/libraries/OffsetDelta.sol";
 
 /// @notice Proves the belief offset moves value in the direction the mechanism claims,
@@ -22,7 +25,7 @@ import {OffsetDelta} from "../src/libraries/OffsetDelta.sol";
 contract SignConventionTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
 
-    VaneHook internal hook;
+    VaneHookHarness internal hook;
     PoolKey internal vaneKey;
     PoolKey internal plainKey;
 
@@ -43,8 +46,8 @@ contract SignConventionTest is Test, Deployers {
                 | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_FLAG
         );
         address hookAddr = address(flags ^ (0x4444 << 144));
-        deployCodeTo("VaneHook.sol:VaneHook", abi.encode(manager), hookAddr);
-        hook = VaneHook(hookAddr);
+        deployCodeTo("VaneHookHarness.sol:VaneHookHarness", abi.encode(manager, Fixtures.config()), hookAddr);
+        hook = VaneHookHarness(hookAddr);
 
         vaneKey = PoolKey(currency0, currency1, 3000, 60, IHooks(hookAddr));
         hook.allowPool(vaneKey);
@@ -57,9 +60,12 @@ contract SignConventionTest is Test, Deployers {
         modifyLiquidityRouter.modifyLiquidity(vaneKey, liq, "");
         modifyLiquidityRouter.modifyLiquidity(plainKey, liq, "");
 
-        // Fund the hook so it can settle when it owes value.
-        deal(Currency.unwrap(currency0), address(hook), 1000 ether);
-        deal(Currency.unwrap(currency1), address(hook), 1000 ether);
+        // Fund the reserve with claims. The hook settles offsets in ERC-6909
+        // rather than moving ERC20, so the reserve must be seeded in that form.
+        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+        hook.fundReserve(currency0, 1000 ether);
+        hook.fundReserve(currency1, 1000 ether);
     }
 
     function _swap(PoolKey memory key, bool zeroForOne, int256 amountSpecified)

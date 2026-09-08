@@ -11,10 +11,13 @@ import {Currency} from "v4-core/types/Currency.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
 import {VaneHook} from "../src/VaneHook.sol";
+import {VaneHookHarness} from "./utils/VaneHookHarness.sol";
+import {Fixtures} from "./utils/Fixtures.sol";
 import {OffsetDelta} from "../src/libraries/OffsetDelta.sol";
 import {BeliefState} from "../src/libraries/BeliefState.sol";
 import {KappaLib} from "../src/libraries/KappaLib.sol";
@@ -26,7 +29,7 @@ contract InvariantsTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
 
-    VaneHook internal hook;
+    VaneHookHarness internal hook;
     PoolKey internal vaneKey;
 
     int256 internal constant ONE_X64 = int256(1) << 64;
@@ -42,8 +45,8 @@ contract InvariantsTest is Test, Deployers {
                 | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_FLAG
         );
         address hookAddr = address(flags ^ (0x5555 << 144));
-        deployCodeTo("VaneHook.sol:VaneHook", abi.encode(manager), hookAddr);
-        hook = VaneHook(hookAddr);
+        deployCodeTo("VaneHookHarness.sol:VaneHookHarness", abi.encode(manager, Fixtures.config()), hookAddr);
+        hook = VaneHookHarness(hookAddr);
 
         vaneKey = PoolKey(currency0, currency1, 3000, 60, IHooks(hookAddr));
         hook.allowPool(vaneKey);
@@ -51,8 +54,10 @@ contract InvariantsTest is Test, Deployers {
 
         modifyLiquidityRouter.modifyLiquidity(vaneKey, ModifyLiquidityParams(-60000, 60000, 1000 ether, 0), "");
 
-        deal(Currency.unwrap(currency0), address(hook), 10_000 ether);
-        deal(Currency.unwrap(currency1), address(hook), 10_000 ether);
+        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+        hook.fundReserve(currency0, 10_000 ether);
+        hook.fundReserve(currency1, 10_000 ether);
     }
 
     /// @notice Invariant 1: beforeSwap must not revert for any well-formed swap, at any

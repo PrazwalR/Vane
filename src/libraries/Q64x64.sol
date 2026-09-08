@@ -35,20 +35,65 @@ library Q64x64 {
 
     error Q64x64__CastOverflow();
 
-    /// @notice Integer square root, floor. Babylonian method.
-    /// @dev Converges in at most 7 iterations for a 256-bit input after the initial
-    ///      power-of-two estimate, so the loop bound is a safety net rather than the
-    ///      normal exit path.
+    /// @notice Integer square root, floor.
+    /// @dev Babylonian iteration seeded from the input's bit length. The seed matters
+    ///      enormously: a naive seed of x/2 converges only after roughly log2(x)
+    ///      halvings before the quadratic phase begins, which measured 14,078 gas at
+    ///      x = 2^128 - 1 and made the horizon checkpoint the dominant cost in the hook.
+    ///      Seeding at 2^(ceil(bitlen/2)) starts within a factor of two of the answer,
+    ///      so the quadratic phase begins immediately and five or six iterations suffice
+    ///      for any 256-bit input. Measured gas after the change is recorded in
+    ///      docs/gas.md alongside the before figure.
+    ///
+    ///      The loop is retained rather than being unrolled to a fixed iteration count:
+    ///      it terminates on the floor condition, which is the property the fuzz test
+    ///      asserts, and unrolling would trade that guarantee for a handful of gas.
     function sqrt(uint256 x) internal pure returns (uint256 z) {
-        // Inputs below 4 must be special-cased. The Babylonian seed (x/2 + 1) is not
-        // greater than the running estimate for x <= 3, so the loop never executes and
-        // the function would return x itself: sqrt(2) = 2. Caught by fuzzing against
-        // the floor property, not by the known-value tests, which had no case in range.
+        // Inputs below 4 must be special-cased: the Babylonian step cannot descend below
+        // the seed for x <= 3, so the loop would return x itself and sqrt(2) would be 2.
         if (x == 0) return 0;
         if (x < 4) return 1;
 
-        z = x;
-        uint256 y = (x >> 1) + 1;
+        // Bit length of x, computed by binary search over the halves.
+        uint256 bits;
+        uint256 t = x;
+        if (t >= 1 << 128) {
+            t >>= 128;
+            bits += 128;
+        }
+        if (t >= 1 << 64) {
+            t >>= 64;
+            bits += 64;
+        }
+        if (t >= 1 << 32) {
+            t >>= 32;
+            bits += 32;
+        }
+        if (t >= 1 << 16) {
+            t >>= 16;
+            bits += 16;
+        }
+        if (t >= 1 << 8) {
+            t >>= 8;
+            bits += 8;
+        }
+        if (t >= 1 << 4) {
+            t >>= 4;
+            bits += 4;
+        }
+        if (t >= 1 << 2) {
+            t >>= 2;
+            bits += 2;
+        }
+        if (t >= 1 << 1) {
+            bits += 1;
+        }
+
+        // 2^(floor(bits/2) + 1) is at least sqrt(x), so the iteration descends to the
+        // floor from above and the loop's termination condition stays valid.
+        z = 1 << ((bits >> 1) + 1);
+
+        uint256 y = (z + x / z) >> 1;
         while (y < z) {
             z = y;
             y = (x / y + y) >> 1;

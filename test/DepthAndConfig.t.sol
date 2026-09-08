@@ -46,7 +46,7 @@ contract DepthAndConfigTest is Test {
             deltaDustX64: uint64(ONE_X64 / 100_000),
             maxTickDelta: 2000,
             flowUnit: 1e12,
-            reserveTargetRatioX32: uint64(ONE_X32),
+            reserveTargetDefault: 100 ether,
             safetyFactorBps: 20_000
         });
     }
@@ -232,7 +232,7 @@ contract DepthAndConfigTest is Test {
         assertGt(c.flowLambdaX32, 0, "flow lambda must survive its cast");
         assertGt(c.kappaMaxX64, 0, "kappa max must survive its cast");
         assertGt(c.deltaMaxX64, 0, "delta max must survive its cast");
-        assertGt(c.reserveTargetRatioX32, 0, "reserve ratio must survive its cast");
+        assertGt(c.reserveTargetDefault, 0, "reserve target must survive its cast");
 
         // The boundary itself: 1.0 in Q64.64 does not fit, 1.0 in Q32.32 does.
         assertEq(uint64(ONE_X64), 0, "1.0 in Q64.64 truncates to zero in a uint64");

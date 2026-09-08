@@ -36,12 +36,14 @@ struct VaneConfig {
     /// @notice Wei per flow unit. Flow is accumulated in these units so squaring it
     ///         cannot overflow the packed state field.
     uint64 flowUnit;
-    /// @notice Reserve level at which the belief is applied at full strength, Q32.32.
-    /// @dev Q32.32 rather than Q64.64 because 1.0 -- the natural full-strength value --
-    ///      is 2^64 in Q64.64 and does not fit a uint64 by exactly one bit. The same
-    ///      one-bit truncation that would have silently zeroed the belief in the packed
-    ///      state would silently zero this ratio and disable the mechanism.
-    uint64 reserveTargetRatioX32;
+    /// @notice Default reserve at which the belief applies at full strength, in token
+    ///         base units. Eq (5.1): R >= SAFETY_FACTOR * Q_max * delta_max.
+    /// @dev An ABSOLUTE amount, not a ratio. An earlier draft carried a Q32.32 ratio here
+    ///      and compared it against a raw token balance, which is dimensionally
+    ///      meaningless and silently disabled the mechanism. Because it is absolute it is
+    ///      also decimals-dependent, so a pool pairing a 6-decimal and an 18-decimal
+    ///      token must override it per currency via setReserveTarget.
+    uint128 reserveTargetDefault;
     /// @notice Solvency multiple over the worst-case payout, in basis points. Eq (5.1).
     uint16 safetyFactorBps;
 }
@@ -132,7 +134,7 @@ library VaneConfigLib {
             revert Vane__FlowUnitOutOfRange();
         }
 
-        if (c.reserveTargetRatioX32 == 0) revert Vane__ReserveTargetZero();
+        if (c.reserveTargetDefault == 0) revert Vane__ReserveTargetZero();
         if (c.safetyFactorBps < 10_000) revert Vane__SafetyFactorTooLow();
     }
 
