@@ -3,3 +3,7 @@ cache/
 lib/
 .env
 broadcast/
+
+# Working notes stay local. README.md is the only markdown that ships.
+*.md
+!README.md
