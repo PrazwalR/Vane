@@ -211,15 +211,49 @@ contract VarianceTest is Test {
             flowVar = FlowVariance.updateFlowVar(flowVar, flowPerBlock, LAMBDA_X32);
         }
 
-        uint256 uX32 = FlowVariance.noiseScaleX32(flowVar);
-        uint256 expected = (uint256(1000) * Q64x64.ONE_X32) / Q64x64.sqrt(2 << 64) * (uint256(1) << 32);
+        uint256 u = FlowVariance.noiseScale(flowVar);
 
-        console2.log("flowVar Q32.32", flowVar);
-        console2.log("U       Q32.32", uX32);
+        console2.log("flowVar, raw squared flow units", flowVar);
+        console2.log("U, flow units", u);
 
-        // U = 1000 / sqrt(2) = 707.1
-        assertApproxEqRel(uX32, uint256(707) << 32, 0.01e18, "U must equal flow over root two");
-        expected; // silence unused warning without weakening the assertion above
+        // U = 1000 / sqrt(2) = 707.1, floored to 707 in integer flow units.
+        assertApproxEqRel(u, 707, 0.01e18, "U must equal flow over root two");
+    }
+
+    /// @notice Flow variance must survive a realistic block of flow without saturating.
+    /// @dev Regression for a scaling defect. flowVar was stored in Q32.32, which spends
+    ///      32 of a uint64's bits on fractional precision for a quantity that is already
+    ///      a large integer. That left only 4.3e9 of range, so a single 1 ether trade at
+    ///      flowUnit = 1e12 produced 4.3e21 and pinned the estimator at its ceiling. A
+    ///      saturated E[y^2] makes U meaningless, which makes kappa meaningless, and
+    ///      nothing reverts to signal it.
+    function test_FlowVar_DoesNotSaturateOnRealisticFlow() public pure {
+        // 1 ether of block flow at flowUnit = 1e12 is 1e6 flow units.
+        int64 oneEtherInUnits = 1e6;
+
+        uint64 flowVar = 0;
+        for (uint256 i = 0; i < 2000; i++) {
+            flowVar = FlowVariance.updateFlowVar(flowVar, oneEtherInUnits, LAMBDA_X32);
+        }
+
+        assertLt(flowVar, type(uint64).max, "a 1 ether block must not saturate the estimator");
+
+        // E[y^2] should converge to (1e6)^2 = 1e12, so U = 1e6/sqrt(2) = 707,107 units.
+        uint256 u = FlowVariance.noiseScale(flowVar);
+        console2.log("flowVar after 1 ether blocks:", flowVar);
+        console2.log("U in flow units:", u);
+        assertApproxEqRel(u, 707_106, 0.01e18, "U must equal flow over root two");
+    }
+
+    /// @notice A hundred ether of block flow must still fit.
+    function test_FlowVar_HandlesLargeBlockFlow() public pure {
+        int64 hundredEther = 1e8;
+        uint64 flowVar = 0;
+        for (uint256 i = 0; i < 3000; i++) {
+            flowVar = FlowVariance.updateFlowVar(flowVar, hundredEther, LAMBDA_X32);
+        }
+        assertLt(flowVar, type(uint64).max, "100 ether of block flow must not saturate");
+        assertApproxEqRel(FlowVariance.noiseScale(flowVar), 70_710_678, 0.01e18, "U scales linearly");
     }
 
     /// @notice Threat 3, wash trading. Inflating flow variance raises U, and kappa falls
@@ -236,8 +270,8 @@ contract VarianceTest is Test {
         uint64 honestFlowVar = uint64(uint256(1_000_000) << 32);
         uint64 washedFlowVar = uint64(uint256(100_000_000) << 32); // attacker inflates E[y^2]
 
-        uint256 uHonest = Q64x64.x32ToX64(FlowVariance.noiseScaleX32(honestFlowVar));
-        uint256 uWashed = Q64x64.x32ToX64(FlowVariance.noiseScaleX32(washedFlowVar));
+        uint256 uHonest = Q64x64.x32ToX64(FlowVariance.noiseScale(honestFlowVar));
+        uint256 uWashed = Q64x64.x32ToX64(FlowVariance.noiseScale(washedFlowVar));
 
         assertGt(uWashed, uHonest, "wash trading must raise the noise scale");
 
@@ -326,11 +360,13 @@ contract VarianceTest is Test {
         for (uint256 i = 0; i < 3000; i++) {
             flowVar = FlowVariance.updateFlowVar(flowVar, 1000, LAMBDA_X32);
         }
-        uint256 uX32 = FlowVariance.noiseScaleX32(flowVar);
+        uint256 u = FlowVariance.noiseScale(flowVar);
 
-        // 707.106781 in Q32.32.
-        uint256 referenceU = 3_037_000_499_976;
-        assertApproxEqRel(uX32, referenceU, 0.000001e18, "U must match the reference to 1e-6");
+        // 1000/sqrt(2) = 707.106781, floored to 707 in integer flow units. The estimator
+        // now carries raw squared flow units rather than Q32.32, so sub-unit precision
+        // is deliberately gone; at a realistic 1e6 flow units per ether that costs
+        // roughly one part per million, against the 32 bits of range it buys back.
+        assertApproxEqRel(u, 707, 0.002e18, "U must match the reference");
     }
 
     /// @notice A pure trend has VR = k exactly, and a series whose horizon variance is a

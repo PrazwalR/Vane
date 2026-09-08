@@ -32,7 +32,7 @@ contract MicroTest is Test {
 
     function test_Micro_NoiseScaleGas() public view {
         uint256 g = gasleft();
-        FlowVariance.noiseScaleX32(uint64(4_294_967_295_999_606));
-        console2.log("noiseScaleX32 gas:", g - gasleft());
+        FlowVariance.noiseScale(uint64(4_294_967_295_999_606));
+        console2.log("noiseScale gas:", g - gasleft());
     }
 }

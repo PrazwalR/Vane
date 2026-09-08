@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {FullMath} from "v4-core/libraries/FullMath.sol";
+
 import {Q64x64} from "./Q64x64.sol";
 
 /// @title DepthLib
@@ -21,7 +23,20 @@ import {Q64x64} from "./Q64x64.sol";
 library DepthLib {
     error DepthLib__ZeroPrice();
 
-    /// @notice Computes D = L * sqrt(P) in Q64.64, denominated in the numeraire.
+    /// @notice Computes D = L * sqrt(P) in Q64.64, denominated in FLOW UNITS.
+    /// @dev Denominating in flow units rather than in wei is what makes the whole
+    ///      correction representable. lambda is a log price per unit of notional, so with
+    ///      notional in wei a realistic pool gives lambda_amm = 2/5e21 = 4e-22, while
+    ///      Q64.64 resolves only to 5.4e-20. Both lambda terms truncate to zero, kappa
+    ///      comes out zero, and the entire Kyle-matching core of eq (2.5) silently
+    ///      contributes nothing -- leaving the variance-ratio controller running against
+    ///      a zero anchor and pinning itself near its cap.
+    ///
+    ///      In flow units the same pool gives D = 5e9, lambda_amm = 4e-10, and a kappa
+    ///      of order 1e-9 that produces a belief of about 50 bps on a 5 ether block.
+    ///      U is already accumulated in flow units, and the belief update multiplies
+    ///      kappa by flow in those units, so this is the one place the conversion has to
+    ///      happen for the three to agree.
     /// @dev Returns zero for zero liquidity rather than reverting. A pool with no
     ///      liquidity in range has infinite price impact, and the caller's kappa
     ///      computation reads a zero depth as "no correction possible" via
@@ -29,16 +44,18 @@ library DepthLib {
     ///      invariant 1, because beforeSwap must survive an empty pool.
     /// @param liquidity Active liquidity L from the pool.
     /// @param sqrtPriceX96 Current sqrt price in Q64.96.
-    /// @return depthX64 Depth in Q64.64 numeraire units.
-    function depthX64(uint128 liquidity, uint160 sqrtPriceX96) internal pure returns (uint256) {
-        if (liquidity == 0 || sqrtPriceX96 == 0) return 0;
+    /// @param flowUnit Wei per flow unit, the scale flow and U are accumulated in.
+    /// @return Depth in Q64.64, denominated in flow units.
+    function depthX64(uint128 liquidity, uint160 sqrtPriceX96, uint64 flowUnit) internal pure returns (uint256) {
+        if (liquidity == 0 || sqrtPriceX96 == 0 || flowUnit == 0) return 0;
 
-        // L * sqrtP is at most 2^128 * 2^160 = 2^288, which overflows uint256. Shift the
-        // price down first: sqrtPriceX96 >> 32 leaves Q64.64, bounding the product by
-        // 2^128 * 2^128 = 2^256. That is still the exact boundary, so the shift is split
-        // to keep the intermediate strictly inside the type.
+        // sqrtPriceX96 >> 32 puts the price on the Q64.64 scale. The product with
+        // liquidity reaches 2^128 * 2^128 at the extremes of the tick range, exactly the
+        // uint256 boundary, so the division by flowUnit is folded into a 512-bit mulDiv
+        // rather than applied afterwards. Dividing liquidity first instead would
+        // truncate small positions to nothing.
         uint256 sqrtPriceX64 = uint256(sqrtPriceX96) >> 32;
-        return uint256(liquidity) * sqrtPriceX64;
+        return FullMath.mulDiv(uint256(liquidity), sqrtPriceX64, uint256(flowUnit));
     }
 
     /// @notice The informationally correct depth D* = 4U/sigma, per eq (2.3).
@@ -46,7 +63,7 @@ library DepthLib {
     ///      the thesis is about. Exposed so tests and the simulator can compare the
     ///      pool's actual depth against the target directly rather than inferring it
     ///      from the sign of kappa.
-    /// @param noiseX64 Noise notional scale U in Q64.64.
+    /// @param noiseX64 Noise notional scale U in Q64.64 flow units.
     /// @param sigmaX64 Per-block fundamental log-volatility in Q64.64.
     function targetDepthX64(uint256 noiseX64, uint256 sigmaX64) internal pure returns (uint256) {
         if (sigmaX64 == 0) return type(uint256).max;

@@ -20,7 +20,7 @@ import {DepthLib} from "./libraries/DepthLib.sol";
 import {Q64x64} from "./libraries/Q64x64.sol";
 import {HorizonVariance} from "./libraries/HorizonVariance.sol";
 import {FlowVariance} from "./libraries/FlowVariance.sol";
-import {VarianceRatio} from "./libraries/VarianceRatio.sol";
+import {VarianceRatio, ControllerParams} from "./libraries/VarianceRatio.sol";
 import {PoolStateLib, PoolState, PoolStateAux} from "./libraries/PoolStateLib.sol";
 import {VaneConfig, VaneConfigLib} from "./config/VaneConfig.sol";
 
@@ -369,9 +369,9 @@ contract VaneHook is IHooks, IUnlockCallback {
         // volatility, and deriving sigma from it makes kappa too small and fails
         // silently in the direction of doing nothing. Section 3.1.
         uint256 sigmaX64 = HorizonVariance.sigmaX64(a.varKX32, horizon);
-        uint256 noiseX64 = Q64x64.x32ToX64(FlowVariance.noiseScaleX32(s.flowVarX32));
+        uint256 noiseX64 = FlowVariance.noiseScaleX64(s.flowVarX32);
 
-        uint256 depth = DepthLib.depthX64(POOL_MANAGER.getLiquidity(id), sqrtPriceX96);
+        uint256 depth = DepthLib.depthX64(POOL_MANAGER.getLiquidity(id), sqrtPriceX96, FLOW_UNIT);
 
         uint256 openLoop = KappaLib.kappaX64(depth, sigmaX64, noiseX64, KAPPA_MAX_X64);
 
@@ -390,11 +390,14 @@ contract VaneHook is IHooks, IUnlockCallback {
             VarianceRatio.step(
                 a.kappaX64,
                 openLoop,
+                openLoop,
                 vrX32,
-                CONTROLLER_GAIN_X32,
-                CONTROLLER_LEAK_X32,
-                CONTROLLER_DEADBAND_X32,
-                KAPPA_MAX_X64
+                ControllerParams({
+                    etaX32: CONTROLLER_GAIN_X32,
+                    rhoX32: CONTROLLER_LEAK_X32,
+                    deadbandX32: CONTROLLER_DEADBAND_X32,
+                    kappaMaxX64: KAPPA_MAX_X64
+                })
             )
         );
 

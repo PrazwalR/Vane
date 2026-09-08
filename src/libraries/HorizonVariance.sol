@@ -103,13 +103,20 @@ library HorizonVariance {
         // Per-block variance in squared ticks, Q32.32.
         uint256 perBlockVarX32 = uint256(varKX32) / uint256(horizonK);
 
-        // Convert squared ticks to squared log price: Var(lnP) = Var(tick) * ln(1.0001)^2.
-        // perBlockVarX32 is Q32.32 and TICK_LN_SQ_X64 is Q64.64, so the product is
-        // Q96.96; shifting down by 64 lands on Q32.32.
-        uint256 logVarX32 = (perBlockVarX32 * Q64x64.TICK_LN_SQ_X64) >> 64;
-
-        // sqrt of a Q32.32 value is Q32.32; widen to Q64.64 for the kappa math.
-        return Q64x64.x32ToX64(Q64x64.sqrtX32(logVarX32));
+        // Take the root in TICK space, then scale by ln(1.0001) once.
+        //
+        // The obvious order is the wrong one. Converting to log-price variance first
+        // means multiplying by ln(1.0001)^2 = 1e-8 while still at Q32.32, whose smallest
+        // representable value is 2.3e-10: any per-block volatility below about 1.5e-5
+        // truncates the variance to zero, so sigma comes out zero, kappa comes out zero,
+        // and the mechanism silently does nothing on precisely the low-volatility pools
+        // it is aimed at. Rooting first keeps the quantity in a range Q32.32 can hold and
+        // applies the small constant once, at full Q64.64 precision.
+        //
+        // sqrtX32 returns ticks in Q32.32; multiplying by the Q64.64 constant gives
+        // Q96.96, and shifting down by 32 lands on Q64.64.
+        uint256 sigmaTicksX32 = Q64x64.sqrtX32(perBlockVarX32);
+        return (sigmaTicksX32 * uint256(Q64x64.TICK_LN_X64)) >> 32;
     }
 
     /// @notice Variance ratio VR(k) = Var(r_k) / (k * Var(r_1)), per eq (3.5), in Q32.32.

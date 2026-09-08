@@ -3,7 +3,7 @@ pragma solidity 0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
 
-import {VarianceRatio} from "../src/libraries/VarianceRatio.sol";
+import {VarianceRatio, ControllerParams} from "../src/libraries/VarianceRatio.sol";
 import {Q64x64} from "../src/libraries/Q64x64.sol";
 
 /// @notice M5 controller stability. The properties asserted here were derived by
@@ -43,8 +43,12 @@ contract ControllerTest is Test {
 
         for (uint256 i = 0; i < 4000; i++) {
             uint256 vr = _vrSample(i, spread);
-            kappaPure = VarianceRatio.step(kappaPure, KAPPA_ANCHOR, vr, ETA, 0, NO_DEADBAND, KAPPA_MAX);
-            kappaLeaky = VarianceRatio.step(kappaLeaky, KAPPA_ANCHOR, vr, ETA, RHO, NO_DEADBAND, KAPPA_MAX);
+            kappaPure = VarianceRatio.step(
+                kappaPure, KAPPA_ANCHOR, KAPPA_ANCHOR, vr, ControllerParams(ETA, 0, NO_DEADBAND, KAPPA_MAX)
+            );
+            kappaLeaky = VarianceRatio.step(
+                kappaLeaky, KAPPA_ANCHOR, KAPPA_ANCHOR, vr, ControllerParams(ETA, RHO, NO_DEADBAND, KAPPA_MAX)
+            );
         }
 
         console2.log("pure integrator kappa (anchor = 1.0 in Q64.64):", kappaPure);
@@ -68,8 +72,12 @@ contract ControllerTest is Test {
         uint256 kappaPure = KAPPA_ANCHOR;
         uint256 kappaLeaky = KAPPA_ANCHOR;
         for (uint256 i = 0; i < 20_000; i++) {
-            kappaPure = VarianceRatio.step(kappaPure, KAPPA_ANCHOR, biasedVr, ETA, 0, NO_DEADBAND, KAPPA_MAX);
-            kappaLeaky = VarianceRatio.step(kappaLeaky, KAPPA_ANCHOR, biasedVr, ETA, RHO, NO_DEADBAND, KAPPA_MAX);
+            kappaPure = VarianceRatio.step(
+                kappaPure, KAPPA_ANCHOR, KAPPA_ANCHOR, biasedVr, ControllerParams(ETA, 0, NO_DEADBAND, KAPPA_MAX)
+            );
+            kappaLeaky = VarianceRatio.step(
+                kappaLeaky, KAPPA_ANCHOR, KAPPA_ANCHOR, biasedVr, ControllerParams(ETA, RHO, NO_DEADBAND, KAPPA_MAX)
+            );
         }
 
         console2.log("pure integrator, persistent 10% VR error:", kappaPure);
@@ -91,7 +99,9 @@ contract ControllerTest is Test {
 
         uint256 kappa = KAPPA_ANCHOR;
         for (uint256 i = 0; i < 20_000; i++) {
-            kappa = VarianceRatio.step(kappa, KAPPA_ANCHOR, trendingVr, ETA, RHO, NO_DEADBAND, KAPPA_MAX);
+            kappa = VarianceRatio.step(
+                kappa, KAPPA_ANCHOR, KAPPA_ANCHOR, trendingVr, ControllerParams(ETA, RHO, NO_DEADBAND, KAPPA_MAX)
+            );
         }
 
         console2.log("kappa after sustained VR = 1.25:", kappa);
@@ -104,7 +114,9 @@ contract ControllerTest is Test {
 
         uint256 kappa = KAPPA_ANCHOR;
         for (uint256 i = 0; i < 20_000; i++) {
-            kappa = VarianceRatio.step(kappa, KAPPA_ANCHOR, revertingVr, ETA, RHO, NO_DEADBAND, KAPPA_MAX);
+            kappa = VarianceRatio.step(
+                kappa, KAPPA_ANCHOR, KAPPA_ANCHOR, revertingVr, ControllerParams(ETA, RHO, NO_DEADBAND, KAPPA_MAX)
+            );
         }
 
         console2.log("kappa after sustained VR = 0.5:", kappa);
@@ -118,7 +130,9 @@ contract ControllerTest is Test {
 
         uint256 kappa = KAPPA_ANCHOR;
         for (uint256 i = 0; i < 100; i++) {
-            kappa = VarianceRatio.step(kappa, KAPPA_ANCHOR, smallVr, ETA, RHO, deadband, KAPPA_MAX);
+            kappa = VarianceRatio.step(
+                kappa, KAPPA_ANCHOR, KAPPA_ANCHOR, smallVr, ControllerParams(ETA, RHO, deadband, KAPPA_MAX)
+            );
         }
 
         assertEq(kappa, KAPPA_ANCHOR, "excursions inside the deadband must not move kappa");
@@ -131,7 +145,9 @@ contract ControllerTest is Test {
 
         uint256 kappa = KAPPA_ANCHOR;
         for (uint256 i = 0; i < 1000; i++) {
-            kappa = VarianceRatio.step(kappa, KAPPA_ANCHOR, largeVr, ETA, RHO, deadband, KAPPA_MAX);
+            kappa = VarianceRatio.step(
+                kappa, KAPPA_ANCHOR, KAPPA_ANCHOR, largeVr, ControllerParams(ETA, RHO, deadband, KAPPA_MAX)
+            );
         }
 
         assertGt(kappa, KAPPA_ANCHOR, "excursions beyond the deadband must move kappa");
@@ -178,7 +194,9 @@ contract ControllerTest is Test {
         uint256 eta = bound(uint256(rawEta), 0, ONE_X32 / 10);
         uint256 rho = bound(uint256(rawRho), 0, ONE_X32);
 
-        uint256 next = VarianceRatio.step(kappa, KAPPA_ANCHOR, vr, eta, rho, NO_DEADBAND, KAPPA_MAX);
+        uint256 next = VarianceRatio.step(
+            kappa, KAPPA_ANCHOR, KAPPA_ANCHOR, vr, ControllerParams(eta, rho, NO_DEADBAND, KAPPA_MAX)
+        );
 
         assertLe(next, KAPPA_MAX, "kappa must never exceed its cap");
     }
@@ -192,7 +210,9 @@ contract ControllerTest is Test {
 
         uint256 kappa = KAPPA_ANCHOR;
         for (uint256 i = 0; i < 50; i++) {
-            kappa = VarianceRatio.step(kappa, KAPPA_ANCHOR, vr, eta, rho, NO_DEADBAND, KAPPA_MAX);
+            kappa = VarianceRatio.step(
+                kappa, KAPPA_ANCHOR, KAPPA_ANCHOR, vr, ControllerParams(eta, rho, NO_DEADBAND, KAPPA_MAX)
+            );
         }
         assertLe(kappa, KAPPA_MAX, "kappa must remain clamped after repeated steps");
     }

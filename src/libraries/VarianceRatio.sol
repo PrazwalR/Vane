@@ -38,6 +38,18 @@ import {Q64x64} from "./Q64x64.sol";
 ///      steady-state loop gain becomes eta/rho, so a real signal moves kappa by
 ///      eta*error/rho rather than running to the clamp. Choosing rho is choosing that
 ///      gain deliberately, which the original formulation left undefined.
+/// @notice Controller settings, grouped so the step signature stays inside the stack.
+struct ControllerParams {
+    /// @notice Gain eta, Q32.32.
+    uint256 etaX32;
+    /// @notice Leak rho toward the anchor, Q32.32, strictly positive.
+    uint256 rhoX32;
+    /// @notice VR deviation below which no update is made, Q32.32.
+    uint256 deadbandX32;
+    /// @notice Upper clamp on kappa, Q64.64.
+    uint256 kappaMaxX64;
+}
+
 library VarianceRatio {
     /// @notice Q32.32 unit, the scale VR and the controller parameters are carried in.
     uint256 internal constant ONE_X32 = 1 << 32;
@@ -51,19 +63,20 @@ library VarianceRatio {
     /// @param kappaX64 Current impact gain, Q64.64.
     /// @param kappaOpenLoopX64 Open-loop kappa from eq (2.5), the anchor.
     /// @param varianceRatioX32 Measured VR in Q32.32, from HorizonVariance.
-    /// @param etaX32 Controller gain in Q32.32.
-    /// @param rhoX32 Leak rate toward the anchor in Q32.32, strictly positive.
-    /// @param deadbandX32 Absolute VR deviation below which no update is made, Q32.32.
-    /// @param kappaMaxX64 Upper clamp on kappa.
+    /// @param kappaScaleX64 Scale the proportional term is measured against, Q64.64.
+    ///        Normally the open-loop kappa: it makes the step RELATIVE to kappa's own
+    ///        magnitude, so a 10 percent VR error at eta = 0.01 moves kappa by 0.1
+    ///        percent of its anchor. Without it the drive term is an absolute Q64.64
+    ///        quantity of order 1e17 while a realistic kappa is of order 1e10, and a
+    ///        single step saturates the clamp no matter what the anchor says.
+    /// @param p Controller settings.
     /// @return Next kappa, Q64.64.
     function step(
         uint256 kappaX64,
         uint256 kappaOpenLoopX64,
+        uint256 kappaScaleX64,
         uint256 varianceRatioX32,
-        uint256 etaX32,
-        uint256 rhoX32,
-        uint256 deadbandX32,
-        uint256 kappaMaxX64
+        ControllerParams memory p
     ) internal pure returns (uint256) {
         // Error term (VR - 1) in Q32.32, signed.
         int256 errX32 = int256(varianceRatioX32) - int256(ONE_X32);
@@ -71,22 +84,23 @@ library VarianceRatio {
         // The deadband rejects excursions inside the estimator's own noise floor. It is
         // sized from SD(VR), not chosen: see the lesson for the closed form.
         uint256 absErr = errX32 < 0 ? uint256(-errX32) : uint256(errX32);
-        if (absErr <= deadbandX32) {
+        if (absErr <= p.deadbandX32) {
             errX32 = 0;
         }
 
-        // Proportional term: eta * (VR - 1), carried at Q64.64 to match kappa's scale.
-        // etaX32 and errX32 are both Q32.32, so their product is Q64.64 directly.
-        int256 driveX64 = (int256(etaX32) * errX32) / 1;
+        // Proportional term: eta * (VR - 1) * kappa_scale, per eq (3.6). etaX32 and
+        // errX32 are both Q32.32, so their product is a Q64.64 dimensionless factor;
+        // multiplying by the Q64.64 scale and shifting back down by 64 lands on Q64.64.
+        int256 driveX64 = (int256(p.etaX32) * errX32 * int256(kappaScaleX64)) >> 64;
 
         // Leak term: -rho * (kappa - anchor), in Q64.64.
         int256 deviationX64 = int256(kappaX64) - int256(kappaOpenLoopX64);
-        int256 leakX64 = (int256(rhoX32) * deviationX64) >> 32;
+        int256 leakX64 = (int256(p.rhoX32) * deviationX64) >> 32;
 
         int256 next = int256(kappaX64) + driveX64 - leakX64;
 
         if (next < 0) return 0;
-        if (uint256(next) > kappaMaxX64) return kappaMaxX64;
+        if (uint256(next) > p.kappaMaxX64) return p.kappaMaxX64;
         return uint256(next);
     }
 

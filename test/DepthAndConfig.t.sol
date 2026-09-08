@@ -31,6 +31,9 @@ contract DepthAndConfigTest is Test {
 
     uint256 internal constant ONE_X32 = 1 << 32;
     uint256 internal constant ONE_X64 = 1 << 64;
+    /// @dev A flow unit of 1 leaves depth in raw token units, so the scaling assertions
+    ///      below test the L*sqrt(P) relationship itself rather than the denomination.
+    uint64 internal constant UNIT_FLOW = 1;
 
     function _validConfig() internal pure returns (VaneConfig memory c) {
         c = VaneConfig({
@@ -61,7 +64,7 @@ contract DepthAndConfigTest is Test {
         uint160 sqrtPrice1 = uint160(1) << 96; // 1.0 in Q64.96
         uint128 liquidity = 1_000_000;
 
-        uint256 d = DepthLib.depthX64(liquidity, sqrtPrice1);
+        uint256 d = DepthLib.depthX64(liquidity, sqrtPrice1, UNIT_FLOW);
 
         console2.log("depth at P=1 (Q64.64):", d);
         assertEq(d, uint256(liquidity) << 64, "depth must equal L at unit price");
@@ -75,8 +78,8 @@ contract DepthAndConfigTest is Test {
         uint256 m = bound(uint256(mult), 2, 10);
         uint160 sqrtPrice = uint160(1) << 96;
 
-        uint256 d1 = DepthLib.depthX64(l, sqrtPrice);
-        uint256 dm = DepthLib.depthX64(uint128(l * m), sqrtPrice);
+        uint256 d1 = DepthLib.depthX64(l, sqrtPrice, UNIT_FLOW);
+        uint256 dm = DepthLib.depthX64(uint128(l * m), sqrtPrice, UNIT_FLOW);
 
         assertEq(dm, d1 * m, "depth must scale linearly with liquidity");
     }
@@ -87,8 +90,8 @@ contract DepthAndConfigTest is Test {
         uint160 sqrtP1 = uint160(1) << 96; // P = 1
         uint160 sqrtP4 = uint160(2) << 96; // sqrt(P) = 2, so P = 4
 
-        uint256 d1 = DepthLib.depthX64(l, sqrtP1);
-        uint256 d4 = DepthLib.depthX64(l, sqrtP4);
+        uint256 d1 = DepthLib.depthX64(l, sqrtP1, UNIT_FLOW);
+        uint256 d4 = DepthLib.depthX64(l, sqrtP4, UNIT_FLOW);
 
         assertEq(d4, 2 * d1, "quadrupling price must double depth");
     }
@@ -96,14 +99,14 @@ contract DepthAndConfigTest is Test {
     /// @notice An empty pool must return zero depth, not revert. Invariant 1: beforeSwap
     ///         has to survive a pool with no liquidity in range.
     function test_Depth_ZeroLiquidityReturnsZeroNotRevert() public pure {
-        assertEq(DepthLib.depthX64(0, uint160(1) << 96), 0, "zero liquidity gives zero depth");
-        assertEq(DepthLib.depthX64(1000, 0), 0, "zero price gives zero depth");
+        assertEq(DepthLib.depthX64(0, uint160(1) << 96, UNIT_FLOW), 0, "zero liquidity gives zero depth");
+        assertEq(DepthLib.depthX64(1000, 0, UNIT_FLOW), 0, "zero price gives zero depth");
     }
 
     /// @notice Must not overflow at the extremes of the v4 price range.
     function testFuzz_Depth_NeverOverflows(uint128 liquidity, uint160 rawSqrtPrice) public pure {
         uint160 sqrtPrice = uint160(bound(uint256(rawSqrtPrice), TickMath.MIN_SQRT_PRICE, TickMath.MAX_SQRT_PRICE));
-        uint256 d = DepthLib.depthX64(liquidity, sqrtPrice);
+        uint256 d = DepthLib.depthX64(liquidity, sqrtPrice, UNIT_FLOW);
         // Reaching this line without reverting is the assertion.
         assertGe(d, 0);
     }

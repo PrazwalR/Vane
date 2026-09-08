@@ -17,12 +17,19 @@ import {VaneHook} from "../src/VaneHook.sol";
 import {VaneHookHarness} from "./utils/VaneHookHarness.sol";
 import {Fixtures} from "./utils/Fixtures.sol";
 import {PoolState, PoolStateAux} from "../src/libraries/PoolStateLib.sol";
+import {DepthLib} from "../src/libraries/DepthLib.sol";
+import {KappaLib} from "../src/libraries/KappaLib.sol";
+import {HorizonVariance} from "../src/libraries/HorizonVariance.sol";
+import {FlowVariance} from "../src/libraries/FlowVariance.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
 /// @notice End-to-end: the belief must emerge from real order flow through the real
 ///         callbacks, with no test setting it by hand. Everything before this milestone
 ///         proved the pieces in isolation; this proves the pipeline is actually wired.
 contract IntegrationTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
 
     VaneHookHarness internal hook;
     PoolKey internal vaneKey;
@@ -116,6 +123,13 @@ contract IntegrationTest is Test, Deployers {
         assertEq(hook.poolStateAux(id).flowAccum, 0, "accumulator must reset after sampling");
     }
 
+    /// @notice Adds liquidity so the pool sits ABOVE D* = 4U/sigma and therefore
+    ///         under-reacts, which is the regime section 2.4 is about and the only one in
+    ///         which a correction is warranted.
+    function _makeDeep() internal {
+        modifyLiquidityRouter.modifyLiquidity(vaneKey, ModifyLiquidityParams(-60000, 60000, 95_000 ether, 0), "");
+    }
+
     /// @notice The horizon checkpoint must fire after K blocks and populate Var(r_k)
     ///         from a real price move. Until this runs, kappa is zero and VANE is a no-op.
     /// @dev The flow must TREND. Alternating direction returns the price to where it
@@ -124,10 +138,16 @@ contract IntegrationTest is Test, Deployers {
     ///      covered separately in test_Checkpoint_FlatPriceLeavesKappaAtZero.
     function test_Checkpoint_SetsKappaFromPoolState() public {
         assertEq(hook.kappaOf(id), 0, "kappa starts at zero");
+        _makeDeep();
 
-        for (uint256 i = 0; i <= HORIZON_K; i++) {
+        // Run long enough for the EWMAs to converge. At lambda = 0.99 the effective
+        // sample size is (1+lambda)/(1-lambda) = 200 blocks, so a 21-block run measures
+        // an unconverged estimator and reports a kappa that reflects the transient
+        // rather than the pool.
+        for (uint256 i = 0; i < 400; i++) {
             vm.roll(block.number + 1);
-            _swap(true, -5 ether); // sustained one-sided flow moves the price
+            _swap(i % 2 == 0, -5 ether);
+            _swap(i % 2 == 0, -5 ether);
         }
 
         PoolStateAux memory a = hook.poolStateAux(id);
@@ -142,6 +162,53 @@ contract IntegrationTest is Test, Deployers {
         assertGt(a.checkpointBlock, 1, "checkpoint must have advanced past its seed");
         assertGt(a.kappaX64, 0, "kappa must be set from real pool state");
         assertLe(a.kappaX64, uint64(uint256(1 << 64) / 1000), "kappa must respect its cap");
+    }
+
+    /// @notice Diagnostic: prints every term feeding eq (2.5) so a zero kappa can be
+    ///         attributed to a real market condition rather than to a scaling error.
+    function test_Diagnostic_KappaInputs() public {
+        _makeDeep();
+        // The EWMAs need roughly (1+lambda)/(1-lambda) = 200 samples to converge at
+        // lambda = 0.99, so a 21-block run measures an unconverged estimator rather than
+        // the steady state the theory describes.
+        for (uint256 i = 0; i < 400; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -5 ether);
+            _swap(i % 2 == 0, -5 ether);
+        }
+
+        PoolState memory st = hook.poolState(id);
+        PoolStateAux memory a = hook.poolStateAux(id);
+
+        (uint160 sqrtP,,,) = manager.getSlot0(id);
+        uint256 depth = DepthLib.depthX64(manager.getLiquidity(id), sqrtP, 1e12);
+        uint256 sigma = HorizonVariance.sigmaX64(a.varKX32, HORIZON_K);
+        uint256 noise = FlowVariance.noiseScaleX64(st.flowVarX32);
+
+        console2.log("liquidity        :", manager.getLiquidity(id));
+        console2.log("depth   (Q64.64) :", depth);
+        console2.log("varK    (Q32.32) :", a.varKX32);
+        console2.log("sigma   (Q64.64) :", sigma);
+        console2.log("flowVar (raw)    :", st.flowVarX32);
+        console2.log("noise U (Q64.64) :", noise);
+        console2.log("lambda_amm       :", KappaLib.lambdaAmmX64(depth));
+        console2.log("lambda_star      :", KappaLib.lambdaStarX64(sigma, noise));
+        console2.log("D* (Q64.64)      :", DepthLib.targetDepthX64(noise, sigma));
+    }
+
+    /// @notice A pool SHALLOWER than D* = 4U/sigma already over-reacts to order flow, so
+    ///         the correct kappa is zero and the mechanism must decline to act. Eq (2.5)
+    ///         clamps kappa at zero rather than inverting it, because an inverted belief
+    ///         would subsidise the flow trading against it.
+    function test_Kappa_ShallowPoolNeedsNoCorrection() public {
+        // The default 5,000 ether of liquidity sits below D* for this flow and
+        // volatility; roughly 16,000 ether would be needed to cross it.
+        for (uint256 i = 0; i <= HORIZON_K; i++) {
+            vm.roll(block.number + 1);
+            _swap(true, -5 ether);
+        }
+
+        assertEq(hook.kappaOf(id), 0, "an over-reacting pool must not be corrected");
     }
 
     /// @notice A pool whose price returns to where it started has no horizon variance,
@@ -215,6 +282,34 @@ contract IntegrationTest is Test, Deployers {
         _swap(true, -1 ether);
 
         assertGt(hook.poolState(id).varOneX32, 0, "estimator must survive the excursion");
+    }
+
+    /// @notice U must reach kappa in the numeraire's base units, not in flow units.
+    /// @dev Depth is denominated in token base units and kappa compares sigma/(2U)
+    ///      against 2/D, so U has to be converted back out of the flowUnit scaling it is
+    ///      accumulated in. Omitting that made kappa wrong by a factor of flowUnit, which
+    ///      is 1e12 at the default -- large enough to pin kappa at its cap regardless of
+    ///      market conditions, which is indistinguishable from the mechanism working.
+    function test_Kappa_UsesNumeraireUnitsNotFlowUnits() public {
+        _makeDeep();
+        for (uint256 i = 0; i <= HORIZON_K; i++) {
+            vm.roll(block.number + 1);
+            _swap(true, -5 ether);
+        }
+
+        uint256 kappa = hook.kappaOf(id);
+        uint64 kappaMax = uint64(uint256(1 << 64) / 1000);
+
+        console2.log("kappa:", kappa);
+        console2.log("kappa cap:", kappaMax);
+
+        // A kappa at or near its cap means the inputs are mis-scaled rather than that
+        // the pool genuinely wants maximum correction. Require real headroom, not just
+        // strict inequality: at wei denomination both lambda terms underflowed Q64.64,
+        // the open-loop anchor was zero, and the controller alone drove kappa to 98.9%
+        // of the cap. That passed a strict-inequality check while the Kyle core of the
+        // mechanism was contributing nothing at all.
+        assertLt(kappa, kappaMax / 2, "kappa near its cap indicates a scaling error");
     }
 
     /// @notice The belief must emerge from one-sided flow with no manual intervention.
