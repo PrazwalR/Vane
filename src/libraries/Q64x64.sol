@@ -124,6 +124,19 @@ library Q64x64 {
         return (keep + add) >> 32;
     }
 
+    /// @notice Signed exponentially weighted moving average, Q32.32 weighting.
+    /// @dev Autocovariance is signed, so it cannot use the unsigned EWMA. The shift is
+    ///      an arithmetic one, which rounds toward negative infinity for negative values;
+    ///      that is a sub-unit bias on a quantity of order 1e12 and is not corrected.
+    /// @param oldValue Previous EWMA value, in the caller's units.
+    /// @param sample New observation, same units.
+    /// @param lambdaX32 Decay weight in Q32.32, strictly within (0, 1).
+    function ewmaSigned(int256 oldValue, int256 sample, uint256 lambdaX32) internal pure returns (int256) {
+        int256 keep = int256(lambdaX32) * oldValue;
+        int256 add = int256(ONE_X32 - lambdaX32) * sample;
+        return (keep + add) >> 32;
+    }
+
     /// @notice Downcasts to uint64, reverting on overflow.
     function toUint64(uint256 x) internal pure returns (uint64) {
         if (x > type(uint64).max) revert Q64x64__CastOverflow();
