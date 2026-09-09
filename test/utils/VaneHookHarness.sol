@@ -8,6 +8,7 @@ import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {VaneHook} from "../../src/VaneHook.sol";
 import {VaneConfig} from "../../src/config/VaneConfig.sol";
 import {PoolStateLib, PoolState, PoolStateAux} from "../../src/libraries/PoolStateLib.sol";
+import {FlowCovState} from "../../src/libraries/FlowAutocovariance.sol";
 
 /// @notice Test-only access to the hook's packed state.
 /// @dev VaneHook exposes no way to write a belief from outside, because an externally
@@ -32,6 +33,26 @@ contract VaneHookHarness is VaneHook {
         PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id]);
         a.kappaX64 = kappaX64;
         _aux[id] = PoolStateLib.packAux(a);
+    }
+
+    /// @notice Pins the Route B autocovariance state so the divergence check can be
+    ///         driven directly, rather than by constructing flow with a chosen serial
+    ///         correlation through hundreds of real swaps.
+    function setFlowCov(PoolKey calldata key, int64 cov1, int64 cov2) external {
+        FlowCovState storage st = _flowCov[key.toId()];
+        st.cov1 = cov1;
+        st.cov2 = cov2;
+    }
+
+    function flowCovOf(PoolKey calldata key) external view returns (FlowCovState memory) {
+        return _flowCov[key.toId()];
+    }
+
+    function setFlowVar(PoolKey calldata key, uint64 flowVar) external {
+        PoolId id = key.toId();
+        PoolState memory s = PoolStateLib.unpackState(_state[id]);
+        s.flowVarX32 = flowVar;
+        _state[id] = PoolStateLib.packState(s);
     }
 
     function setVarOne(PoolKey calldata key, uint64 varOneX32) external {

@@ -50,7 +50,9 @@ contract DepthAndConfigTest is Test {
             maxTickDelta: 2000,
             flowUnit: 1e12,
             reserveTargetDefault: 100 ether,
-            safetyFactorBps: 20_000
+            safetyFactorBps: 20_000,
+            maxEstimatorDivergenceX32: uint64(ONE_X32 / 2),
+            routeBZScore: 3
         });
     }
 

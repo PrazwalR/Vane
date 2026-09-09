@@ -28,7 +28,11 @@ library Fixtures {
             maxTickDelta: 2000,
             flowUnit: 1e12,
             reserveTargetDefault: 100 ether,
-            safetyFactorBps: 20_000
+            safetyFactorBps: 20_000,
+            // Half of Route B's estimate: beyond that the pool is far enough from Kyle
+            // equilibrium that Route A's kappa should not be trusted at full strength.
+            maxEstimatorDivergenceX32: uint64(ONE_X32 / 2),
+            routeBZScore: 3
         });
     }
 }

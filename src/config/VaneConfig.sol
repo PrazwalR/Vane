@@ -46,6 +46,11 @@ struct VaneConfig {
     uint128 reserveTargetDefault;
     /// @notice Solvency multiple over the worst-case payout, in basis points. Eq (5.1).
     uint16 safetyFactorBps;
+    /// @notice Route A/B divergence above which kappa is shrunk, Q32.32. Section 3.2.
+    uint64 maxEstimatorDivergenceX32;
+    /// @notice Standard errors of the covariance EWMA that Route B must clear before its
+    ///         estimate is used at all.
+    uint64 routeBZScore;
 }
 
 /// @title VaneConfigLib
@@ -96,6 +101,8 @@ library VaneConfigLib {
     error Vane__FlowUnitOutOfRange();
     error Vane__ReserveTargetZero();
     error Vane__SafetyFactorTooLow();
+    error Vane__MaxDivergenceZero();
+    error Vane__RouteBZScoreTooLow();
 
     /// @notice Reverts unless every parameter is inside its documented range.
     function validate(VaneConfig memory c) internal pure {
@@ -136,6 +143,12 @@ library VaneConfigLib {
 
         if (c.reserveTargetDefault == 0) revert Vane__ReserveTargetZero();
         if (c.safetyFactorBps < 10_000) revert Vane__SafetyFactorTooLow();
+
+        // A divergence bound of zero would shrink kappa on any disagreement at all,
+        // including the estimators' own sampling noise.
+        if (c.maxEstimatorDivergenceX32 == 0) revert Vane__MaxDivergenceZero();
+        // Below two standard errors Route B is acting on noise; see minCovRatioX32.
+        if (c.routeBZScore < 2) revert Vane__RouteBZScoreTooLow();
     }
 
     /// @notice The controller's steady-state loop gain eta/rho, Q32.32.

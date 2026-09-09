@@ -22,6 +22,7 @@ import {HorizonVariance} from "./libraries/HorizonVariance.sol";
 import {FlowVariance} from "./libraries/FlowVariance.sol";
 import {VarianceRatio, ControllerParams} from "./libraries/VarianceRatio.sol";
 import {PoolStateLib, PoolState, PoolStateAux} from "./libraries/PoolStateLib.sol";
+import {FlowAutocovariance, FlowCovState} from "./libraries/FlowAutocovariance.sol";
 import {VaneConfig, VaneConfigLib} from "./config/VaneConfig.sol";
 
 /// @title VaneHook
@@ -46,6 +47,12 @@ contract VaneHook is IHooks, IUnlockCallback {
     /// @notice Emitted once per block when the belief or the control state changes.
     event BeliefUpdated(PoolId indexed poolId, int256 deltaX64, uint256 kappaX64, uint256 varianceRatioX32);
 
+    /// @notice Emitted when Route A and Route B disagree beyond the configured bound.
+    /// @dev A large divergence means the pool is not in the Kyle equilibrium Route A
+    ///      assumes, so the open-loop kappa is being computed from a model that does not
+    ///      describe this pool. kappa is shrunk toward zero rather than trusted.
+    event EstimatorDivergence(PoolId indexed poolId, uint256 noiseA, uint256 noiseB, uint256 divergenceX32);
+
     /// @notice Emitted when the reserve is too thin to back the belief at full strength.
     event BeliefScaled(PoolId indexed poolId, uint256 scaleNumerator, uint256 scaleDenominator);
 
@@ -67,6 +74,8 @@ contract VaneHook is IHooks, IUnlockCallback {
     int24 private immutable MAX_TICK_DELTA;
     uint64 private immutable FLOW_UNIT;
     uint128 private immutable RESERVE_TARGET_DEFAULT;
+    uint64 private immutable MAX_DIVERGENCE_X32;
+    uint64 private immutable ROUTE_B_Z_SCORE;
 
     /// @notice Packed hot state, one slot per pool. See PoolStateLib for the bit budget.
     /// @dev Internal rather than private so a test harness can drive state directly.
@@ -76,6 +85,11 @@ contract VaneHook is IHooks, IUnlockCallback {
     mapping(PoolId => bytes32) internal _state;
     /// @notice Packed control state, one slot per pool.
     mapping(PoolId => bytes32) internal _aux;
+    /// @notice Route B autocovariance state, one slot per pool.
+    /// @dev A third slot rather than a repack: the four signed fields need 256 bits and
+    ///      the other two slots have 8 spare between them. Touched only at block
+    ///      boundaries, so the per-swap dust path is unaffected.
+    mapping(PoolId => FlowCovState) internal _flowCov;
 
     /// @notice Pools this hook will attach to.
     mapping(PoolId => bool) public allowlisted;
@@ -110,6 +124,8 @@ contract VaneHook is IHooks, IUnlockCallback {
         MAX_TICK_DELTA = config.maxTickDelta;
         FLOW_UNIT = config.flowUnit;
         RESERVE_TARGET_DEFAULT = config.reserveTargetDefault;
+        MAX_DIVERGENCE_X32 = config.maxEstimatorDivergenceX32;
+        ROUTE_B_Z_SCORE = config.routeBZScore;
     }
 
     // ------------------------------------------------------------------
@@ -314,6 +330,8 @@ contract VaneHook is IHooks, IUnlockCallback {
             int64 blockFlow = a.flowAccum;
             a.flowAccum = 0;
 
+            _flowCov[id] = FlowAutocovariance.update(_flowCov[id], blockFlow, FLOW_LAMBDA_X32);
+
             s.deltaX64 = int64(BeliefState.decay(s.deltaX64, THETA_X64));
             s.lastTick = tickNow;
             s.lastBlock = uint32(block.number);
@@ -347,7 +365,6 @@ contract VaneHook is IHooks, IUnlockCallback {
     ///      kappa from eq (2.5), and steps the variance-ratio controller.
     function _stepHorizon(PoolId id, PoolState memory s, PoolStateAux memory a, int24 tickNow, uint160 sqrtPriceX96)
         private
-        view
         returns (PoolState memory, PoolStateAux memory, uint256 vrX32)
     {
         // The horizon is the number of blocks that ACTUALLY elapsed, not the configured
@@ -374,6 +391,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         uint256 depth = DepthLib.depthX64(POOL_MANAGER.getLiquidity(id), sqrtPriceX96, FLOW_UNIT);
 
         uint256 openLoop = KappaLib.kappaX64(depth, sigmaX64, noiseX64, KAPPA_MAX_X64);
+        openLoop = _applyDivergenceCheck(id, s.flowVarX32, openLoop);
 
         // A zero per-block variance yields VR = 0 from HorizonVariance, which is
         // numerically indistinguishable from extreme mean reversion and would ratchet a
@@ -402,6 +420,31 @@ contract VaneHook is IHooks, IUnlockCallback {
         );
 
         return (s, a, vrX32);
+    }
+
+    /// @dev Route B cross-check, section 3.2. Route A assumes Kyle equilibrium, in which
+    ///      informed and noise flow contribute exactly equally to flow variance; Route B
+    ///      assumes only that noise is serially uncorrelated. A large gap means the pool
+    ///      is not in the equilibrium Route A's kappa was derived under, so kappa is
+    ///      shrunk toward zero rather than acted on.
+    ///
+    ///      Route B returning zero means it could not identify rho from the flow it has
+    ///      seen, which is "no second opinion" and not evidence of disagreement, so the
+    ///      open-loop kappa passes through unchanged.
+    function _applyDivergenceCheck(PoolId id, uint64 flowVar, uint256 openLoop) private returns (uint256) {
+        uint256 minRatio = FlowAutocovariance.minCovRatioX32(FLOW_LAMBDA_X32, ROUTE_B_Z_SCORE);
+        uint256 noiseB = FlowAutocovariance.noiseScale(_flowCov[id], flowVar, minRatio);
+        if (noiseB == 0) return openLoop;
+
+        uint256 noiseA = FlowVariance.noiseScale(flowVar);
+        uint256 divergence = FlowAutocovariance.divergenceX32(noiseA, noiseB);
+        if (divergence <= MAX_DIVERGENCE_X32) return openLoop;
+
+        emit EstimatorDivergence(id, noiseA, noiseB, divergence);
+
+        // Shrink in proportion to how far past the bound the estimators disagree, so the
+        // response degrades smoothly rather than switching off at a threshold.
+        return (openLoop * uint256(MAX_DIVERGENCE_X32)) / divergence;
     }
 
     /// @dev Scales the belief down when the reserve cannot back it, eq (5.2). Never

@@ -116,25 +116,21 @@ library FlowAutocovariance {
     ///      meaningless U rather than a wrong one.
     /// @param st Current state.
     /// @param flowVar Var(y) in raw squared flow units.
-    /// @param minCovRatioX32 Minimum |Cov1| / Var(y) to accept, Q32.32.
-    function isIdentified(FlowCovState memory st, uint64 flowVar, uint256 minCovRatioX32) internal pure returns (bool) {
+    /// @param minRatioX32 Minimum |Cov1| / Var(y) to accept, Q32.32.
+    function isIdentified(FlowCovState memory st, uint64 flowVar, uint256 minRatioX32) internal pure returns (bool) {
         if (st.cov1 <= 0 || st.cov2 <= 0 || flowVar == 0) return false;
         // Cov2 must not exceed Cov1, since rho <= 1 for a stationary AR(1).
         if (uint64(st.cov2) > uint64(st.cov1)) return false;
 
         uint256 ratioX32 = (uint256(uint64(st.cov1)) << 32) / uint256(flowVar);
-        return ratioX32 >= minCovRatioX32;
+        return ratioX32 >= minRatioX32;
     }
 
     /// @notice Route B noise scale U, per eq (3.4'), in flow units.
     /// @dev Returns zero when the estimator is not identified, which the caller must read
     ///      as "no second opinion available" rather than as U = 0.
-    function noiseScale(FlowCovState memory st, uint64 flowVar, uint256 minCovRatioX32)
-        internal
-        pure
-        returns (uint256)
-    {
-        if (!isIdentified(st, flowVar, minCovRatioX32)) return 0;
+    function noiseScale(FlowCovState memory st, uint64 flowVar, uint256 minRatioX32) internal pure returns (uint256) {
+        if (!isIdentified(st, flowVar, minRatioX32)) return 0;
 
         // Var(x) = Cov1^2 / Cov2.
         uint256 c1 = uint256(uint64(st.cov1));
