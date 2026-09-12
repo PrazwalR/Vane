@@ -44,8 +44,32 @@ jobs:
         env:
           FOUNDRY_FUZZ_RUNS: 10000
 
+      - name: Coverage
+        # Gas assertions compare against measured budgets, and coverage instrumentation
+        # inflates gas, so they are skipped here rather than left to fail.
+        run: forge coverage --report summary
+        env:
+          VANE_SKIP_GAS_ASSERTIONS: "true"
+
       - name: Gas snapshot
         run: forge snapshot --check || forge snapshot
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - name: Install dependencies
+        run: |
+          forge install foundry-rs/forge-std --no-git
+          forge install Uniswap/v4-core --no-git
+      - uses: crytic/slither-action@v0.4.0
+        with:
+          fail-on: medium
+          slither-config: slither.config.json
+          target: .
 
   secrets-scan:
     runs-on: ubuntu-latest

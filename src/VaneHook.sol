@@ -34,6 +34,7 @@ contract VaneHook is IHooks, IUnlockCallback {
     error Vane__PoolNotAllowlisted();
     error Vane__NotOwner();
     error Vane__OwnerIsZero();
+    error Vane__UnexpectedCallbackReturn();
 
     event BeliefUpdated(PoolId indexed poolId, int256 deltaX64, uint256 kappaX64, uint256 varianceRatioX32);
 
@@ -105,7 +106,8 @@ contract VaneHook is IHooks, IUnlockCallback {
     }
 
     function fundReserve(Currency currency, uint256 amount) external {
-        POOL_MANAGER.unlock(abi.encode(msg.sender, currency, amount));
+        bytes memory result = POOL_MANAGER.unlock(abi.encode(msg.sender, currency, amount));
+        if (result.length != 0) revert Vane__UnexpectedCallbackReturn();
     }
 
     function unlockCallback(bytes calldata data) external override returns (bytes memory) {
