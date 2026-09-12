@@ -10,20 +10,9 @@ import {VaneConfig, VaneConfigLib} from "../src/config/VaneConfig.sol";
 import {HookMiner} from "./HookMiner.sol";
 import {VaneParameters} from "./VaneParameters.sol";
 
-/// @notice Mines a permissioned address and deploys VaneHook to it.
-/// @dev Run against a fork first. The address is not incidental: v4 reads a hook's
-///      permissions from the low 14 bits of its own address, so a hook at the wrong
-///      address is simply never called for the callbacks it implements, and nothing
-///      reverts to say so. This script mines the address, deploys with CREATE2, and then
-///      asserts the deployed address carries exactly the expected flags.
 contract DeployVane is Script {
-    /// @notice Foundry's canonical CREATE2 factory, present on every chain Foundry
-    ///         supports and pre-deployed in Anvil.
     address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
-    /// @notice Exactly the five permissions VANE uses, per spec section 6.3.
-    /// @dev An unused flag is an audit finding, not a spare tyre: enabling a callback the
-    ///      hook does not implement makes v4 revert every swap.
     uint160 internal constant EXPECTED_FLAGS = uint160(
         Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG
             | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_FLAG
@@ -38,8 +27,7 @@ contract DeployVane is Script {
         address owner = vm.addr(deployerKey);
 
         VaneConfig memory config = VaneParameters.config();
-        // Validate before spending gas on the salt search, so a bad parameter fails in
-        // a second rather than after a minute of mining.
+
         VaneConfigLib.validate(config);
 
         bytes memory constructorArgs = abi.encode(IPoolManager(poolManager), config, owner);

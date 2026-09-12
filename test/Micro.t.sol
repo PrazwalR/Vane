@@ -6,7 +6,6 @@ import {Q64x64} from "../src/libraries/Q64x64.sol";
 import {HorizonVariance} from "../src/libraries/HorizonVariance.sol";
 import {FlowVariance} from "../src/libraries/FlowVariance.sol";
 
-/// @notice Component-level gas, to attribute the checkpoint cost rather than infer it.
 contract MicroTest is Test {
     function test_Micro_SqrtGas() public view {
         uint256[5] memory inputs = [uint256(4), 1e12, 1e24, 2 ** 96, type(uint128).max];
@@ -18,7 +17,6 @@ contract MicroTest is Test {
     }
 
     function test_Micro_SqrtX32Gas() public view {
-        // Realistic varK magnitude from the integration test.
         uint256 g = gasleft();
         Q64x64.sqrtX32(6_701_222_729_825);
         console2.log("sqrtX32 gas, realistic varK:", g - gasleft());

@@ -10,11 +10,6 @@ import {Currency} from "v4-core/types/Currency.sol";
 
 import {VaneHook} from "../src/VaneHook.sol";
 
-/// @notice Allowlists a pool on a deployed hook and initialises it.
-/// @dev Order matters. beforeInitialize rejects any pool that is not allowlisted, so the
-///      allowlist call has to land first; initialising first would simply revert. The
-///      allowlist exists because a hook attached to an attacker's pool could otherwise
-///      drive state the hook keys by pool id (threat 8).
 contract InitializePool is Script {
     using PoolIdLibrary for PoolKey;
 
@@ -30,8 +25,6 @@ contract InitializePool is Script {
         uint160 sqrtPriceX96 = uint160(vm.envUint("SQRT_PRICE_X96"));
         uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
 
-        // v4 requires currency0 < currency1; a reversed pair produces a different pool id
-        // and would silently initialise a pool nobody intended.
         if (token0 >= token1) revert InitializePool__CurrenciesOutOfOrder(token0, token1);
 
         PoolKey memory key = PoolKey({

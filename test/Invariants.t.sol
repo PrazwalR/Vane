@@ -22,9 +22,6 @@ import {OffsetDelta} from "../src/libraries/OffsetDelta.sol";
 import {BeliefState} from "../src/libraries/BeliefState.sol";
 import {KappaLib} from "../src/libraries/KappaLib.sol";
 
-/// @notice Invariants 1, 2, 4 and 5 from spec section 8, plus the arithmetic bounds
-///         from the threat model. Invariant 1 is ranked most severe: a revert in
-///         beforeSwap bricks the pool permanently.
 contract InvariantsTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -33,7 +30,7 @@ contract InvariantsTest is Test, Deployers {
     PoolKey internal vaneKey;
 
     int256 internal constant ONE_X64 = int256(1) << 64;
-    /// @dev delta_max = 100 bps, the spec's stated bound.
+
     int256 internal constant DELTA_MAX = ONE_X64 / 100;
 
     function setUp() public {
@@ -62,8 +59,6 @@ contract InvariantsTest is Test, Deployers {
         hook.fundReserve(currency1, 10_000 ether);
     }
 
-    /// @notice Invariant 1: beforeSwap must not revert for any well-formed swap, at any
-    ///         belief within bounds, in either direction and either exactness mode.
     function testFuzz_Invariant_BeforeSwapNeverReverts(
         int256 rawDelta,
         uint128 rawAmount,
@@ -71,8 +66,7 @@ contract InvariantsTest is Test, Deployers {
         bool exactInput
     ) public {
         int256 d = bound(rawDelta, -DELTA_MAX, DELTA_MAX);
-        // Keep the notional well inside available liquidity so the failure under test is
-        // the hook, not the pool running out of range.
+
         uint256 amount = bound(uint256(rawAmount), 1e6, 50 ether);
 
         hook.setBelief(vaneKey, d);
@@ -89,8 +83,6 @@ contract InvariantsTest is Test, Deployers {
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
             ""
         ) {
-            // Reaching here means all hook deltas settled and NonzeroDeltaCount hit zero,
-            // otherwise PoolManager would have reverted with CurrencyNotSettled.
             assertTrue(true);
         } catch (bytes memory reason) {
             console2.log("swap reverted, delta:", d);
@@ -100,39 +92,30 @@ contract InvariantsTest is Test, Deployers {
         }
     }
 
-    /// @notice Invariant 2: the offset must stay strictly below the swap amount, so
-    ///         HookDeltaExceedsSwapAmount is unreachable within the delta_max clamp.
     function testFuzz_Invariant_OffsetNeverExceedsSwapAmount(int256 rawDelta, uint128 rawNotional) public pure {
         int256 d = bound(rawDelta, -DELTA_MAX, DELTA_MAX);
         uint256 notional = bound(uint256(rawNotional), 1, type(uint128).max / 2);
 
         uint256 offset = OffsetDelta.offsetAmount(notional, d);
 
-        // |e^d - 1| < 1.02% for |d| <= 1%, so the offset is a small fraction of notional.
         assertLt(offset, notional, "offset must never reach the full swap amount");
     }
 
-    /// @notice The Taylor factor must stay within a tight band of the true exponential
-    ///         over the whole legal delta domain. Section 4.1 requires this be asserted
-    ///         against a reference rather than assumed.
     function testFuzz_TaylorFactorIsAccurate(int256 rawDelta) public pure {
         int256 d = bound(rawDelta, -DELTA_MAX, DELTA_MAX);
         int256 factor = OffsetDelta.taylorFactorX64(d);
 
-        // The factor must have the same sign as delta and be close in magnitude.
         if (d > 0) assertGt(factor, 0, "positive belief gives positive factor");
         if (d < 0) assertLt(factor, 0, "negative belief gives negative factor");
 
-        // |factor - d| = d^2/2 <= (0.01)^2/2 = 5e-5, i.e. tiny in Q64.64 terms.
         int256 diff = factor > d ? factor - d : d - factor;
         int256 maxDiff = (DELTA_MAX * DELTA_MAX) / (2 * ONE_X64) + 1;
         assertLe(diff, maxDiff, "second-order term must stay bounded");
     }
 
-    /// @notice Belief decay must be monotone toward zero and never change sign.
     function testFuzz_BeliefDecayIsContractive(int256 rawDelta, uint64 rawTheta) public pure {
         int256 d = bound(rawDelta, -DELTA_MAX, DELTA_MAX);
-        // theta strictly inside (0,1)
+
         uint256 theta = bound(uint256(rawTheta), 1, uint256(ONE_X64) - 1);
 
         int256 decayed = BeliefState.decay(d, theta);
@@ -145,7 +128,6 @@ contract InvariantsTest is Test, Deployers {
         if (d < 0) assertLe(decayed, 0, "decay must not flip a negative belief positive");
     }
 
-    /// @notice The belief update must respect the clamp for any flow, including extremes.
     function testFuzz_BeliefUpdateRespectsClamp(int256 rawDelta, int256 rawKappa, int256 rawFlow) public pure {
         int256 d = bound(rawDelta, -DELTA_MAX, DELTA_MAX);
         int256 kappa = bound(rawKappa, 0, ONE_X64 / 1000);
@@ -157,8 +139,6 @@ contract InvariantsTest is Test, Deployers {
         assertGe(next, -DELTA_MAX, "belief must not fall below the lower clamp");
     }
 
-    /// @notice Reserve scaling implements graceful degradation, eq (5.2): as the reserve
-    ///         drains, the belief shrinks toward zero rather than the hook reverting.
     function testFuzz_ReserveScalingDegradesGracefully(int256 rawDelta, uint128 rawReserve, uint128 rawTarget)
         public
         pure
@@ -176,8 +156,6 @@ contract InvariantsTest is Test, Deployers {
         if (reserve == 0) assertEq(scaled, 0, "an empty reserve must fully disable the belief");
     }
 
-    /// @notice kappa is clamped at zero and never inverts. An inverted kappa would make
-    ///         the pool subsidise flow trading against the belief.
     function testFuzz_KappaNeverInverts(uint128 rawDepth, uint64 rawSigma, uint64 rawNoise) public pure {
         uint256 depth = bound(uint256(rawDepth), 1, type(uint128).max);
         uint256 sigma = bound(uint256(rawSigma), 0, uint256(ONE_X64));
@@ -189,10 +167,8 @@ contract InvariantsTest is Test, Deployers {
         assertLe(k, kappaMax, "kappa must respect its cap");
     }
 
-    /// @notice kappa must increase with depth, eq (2.5): the correction scales with the
-    ///         disease. This is the structural property the whole thesis rests on.
     function test_KappaIsMonotoneInDepth() public pure {
-        uint256 sigma = uint256(ONE_X64) / 50; // 2% per block
+        uint256 sigma = uint256(ONE_X64) / 50;
         uint256 noise = uint256(ONE_X64) * 5;
         uint256 kappaMax = type(uint64).max;
 

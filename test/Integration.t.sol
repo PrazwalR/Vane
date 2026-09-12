@@ -25,9 +25,6 @@ import {FlowCovState} from "../src/libraries/FlowAutocovariance.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
-/// @notice End-to-end: the belief must emerge from real order flow through the real
-///         callbacks, with no test setting it by hand. Everything before this milestone
-///         proved the pieces in isolation; this proves the pipeline is actually wired.
 contract IntegrationTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -91,8 +88,6 @@ contract IntegrationTest is Test, Deployers {
         );
     }
 
-    /// @notice afterInitialize must seed the tick baselines, so the first variance sample
-    ///         measures a real move rather than a jump from zero.
     function test_Init_SeedsTickBaselines() public view {
         PoolState memory s = hook.poolState(id);
         PoolStateAux memory a = hook.poolStateAux(id);
@@ -102,9 +97,6 @@ contract IntegrationTest is Test, Deployers {
         assertEq(s.lastTick, a.checkpointTick, "both tick baselines start equal");
     }
 
-    /// @notice Flow accumulates within a block but the belief does not move until the
-    ///         block turns over. Sampling once per block is invariant 8: per-swap
-    ///         sampling would let an attacker set the pool's own kappa.
     function test_Sampling_IsOncePerBlockNotPerSwap() public {
         _swap(true, -1 ether);
         _swap(true, -1 ether);
@@ -126,27 +118,14 @@ contract IntegrationTest is Test, Deployers {
         assertEq(hook.poolStateAux(id).flowAccum, 0, "accumulator must reset after sampling");
     }
 
-    /// @notice Adds liquidity so the pool sits ABOVE D* = 4U/sigma and therefore
-    ///         under-reacts, which is the regime section 2.4 is about and the only one in
-    ///         which a correction is warranted.
     function _makeDeep() internal {
         modifyLiquidityRouter.modifyLiquidity(vaneKey, ModifyLiquidityParams(-60000, 60000, 95_000 ether, 0), "");
     }
 
-    /// @notice The horizon checkpoint must fire after K blocks and populate Var(r_k)
-    ///         from a real price move. Until this runs, kappa is zero and VANE is a no-op.
-    /// @dev The flow must TREND. Alternating direction returns the price to where it
-    ///      started, so the k-block return is zero and Var(r_k) stays zero -- correctly,
-    ///      since a pool going nowhere carries no information to price. That case is
-    ///      covered separately in test_Checkpoint_FlatPriceLeavesKappaAtZero.
     function test_Checkpoint_SetsKappaFromPoolState() public {
         assertEq(hook.kappaOf(id), 0, "kappa starts at zero");
         _makeDeep();
 
-        // Run long enough for the EWMAs to converge. At lambda = 0.99 the effective
-        // sample size is (1+lambda)/(1-lambda) = 200 blocks, so a 21-block run measures
-        // an unconverged estimator and reports a kappa that reflects the transient
-        // rather than the pool.
         for (uint256 i = 0; i < 400; i++) {
             vm.roll(block.number + 1);
             _swap(i % 2 == 0, -5 ether);
@@ -159,21 +138,15 @@ contract IntegrationTest is Test, Deployers {
         console2.log("varOne(Q32.32):", hook.poolState(id).varOneX32);
 
         assertGt(a.varKX32, 0, "horizon variance must be populated by a trending price");
-        // The checkpoint fires on the first swap at or past K blocks, which is not
-        // necessarily the final block of the loop, so compare against the seed rather
-        // than against block.number.
+
         assertGt(a.checkpointBlock, 1, "checkpoint must have advanced past its seed");
         assertGt(a.kappaX64, 0, "kappa must be set from real pool state");
         assertLe(a.kappaX64, uint64(uint256(1 << 64) / 1000), "kappa must respect its cap");
     }
 
-    /// @notice Diagnostic: prints every term feeding eq (2.5) so a zero kappa can be
-    ///         attributed to a real market condition rather than to a scaling error.
     function test_Diagnostic_KappaInputs() public {
         _makeDeep();
-        // The EWMAs need roughly (1+lambda)/(1-lambda) = 200 samples to converge at
-        // lambda = 0.99, so a 21-block run measures an unconverged estimator rather than
-        // the steady state the theory describes.
+
         for (uint256 i = 0; i < 400; i++) {
             vm.roll(block.number + 1);
             _swap(i % 2 == 0, -5 ether);
@@ -199,13 +172,7 @@ contract IntegrationTest is Test, Deployers {
         console2.log("D* (Q64.64)      :", DepthLib.targetDepthX64(noise, sigma));
     }
 
-    /// @notice A pool SHALLOWER than D* = 4U/sigma already over-reacts to order flow, so
-    ///         the correct kappa is zero and the mechanism must decline to act. Eq (2.5)
-    ///         clamps kappa at zero rather than inverting it, because an inverted belief
-    ///         would subsidise the flow trading against it.
     function test_Kappa_ShallowPoolNeedsNoCorrection() public {
-        // The default 5,000 ether of liquidity sits below D* for this flow and
-        // volatility; roughly 16,000 ether would be needed to cross it.
         for (uint256 i = 0; i <= HORIZON_K; i++) {
             vm.roll(block.number + 1);
             _swap(true, -5 ether);
@@ -214,14 +181,10 @@ contract IntegrationTest is Test, Deployers {
         assertEq(hook.kappaOf(id), 0, "an over-reacting pool must not be corrected");
     }
 
-    /// @notice A pool whose price returns to where it started has no horizon variance,
-    ///         so sigma is zero and kappa stays at zero. This is the mechanism correctly
-    ///         declining to price information that is not there, and it is the reason
-    ///         the checkpoint test above must drive a trend rather than an oscillation.
     function test_Checkpoint_FlatPriceLeavesKappaAtZero() public {
         for (uint256 i = 0; i <= HORIZON_K; i++) {
             vm.roll(block.number + 1);
-            _swap(i % 2 == 0, -0.5 ether); // alternating: price oscillates around start
+            _swap(i % 2 == 0, -0.5 ether);
         }
 
         PoolStateAux memory a = hook.poolStateAux(id);
@@ -232,13 +195,7 @@ contract IntegrationTest is Test, Deployers {
         assertEq(a.kappaX64, 0, "no horizon move means no fundamental volatility to price");
     }
 
-    /// @notice The horizon must be the blocks that actually elapsed, not the configured
-    ///         K. On a pool with sparse flow the checkpoint fires late, and dividing the
-    ///         realised return by K instead of by the true elapsed count overstates both
-    ///         sigma and the variance ratio, pushing kappa up on exactly the illiquid
-    ///         pools least able to absorb an over-correction.
     function test_Checkpoint_LongGapDoesNotInflateKappa() public {
-        // Arm A: checkpoint reached at exactly K blocks with steady flow.
         for (uint256 i = 0; i < HORIZON_K; i++) {
             vm.roll(block.number + 1);
             _swap(true, -5 ether);
@@ -247,38 +204,27 @@ contract IntegrationTest is Test, Deployers {
         _swap(true, -5 ether);
         uint256 kappaDense = hook.kappaOf(id);
 
-        // Arm B: identical price path, but the pool then sits idle far past K before the
-        // next swap trips the checkpoint.
         setUp();
         for (uint256 i = 0; i < HORIZON_K; i++) {
             vm.roll(block.number + 1);
             _swap(true, -5 ether);
         }
-        vm.roll(block.number + 100); // long quiet gap
+        vm.roll(block.number + 100);
         _swap(true, -5 ether);
         uint256 kappaSparse = hook.kappaOf(id);
 
         console2.log("kappa, checkpoint at K blocks :", kappaDense);
         console2.log("kappa, checkpoint after a gap :", kappaSparse);
 
-        // A longer realised horizon over a comparable price move means LOWER per-block
-        // volatility, so kappa must not come out higher than the dense case.
         assertLe(kappaSparse, kappaDense, "a long gap must not inflate kappa");
     }
 
-    /// @notice A long idle period followed by a violent move must not brick the pool.
-    /// @dev End-to-end regression for the saturation fix in HorizonVariance. The horizon
-    ///      clamp scales with elapsed blocks, so a long gap raises the ceiling on r_k far
-    ///      enough that squaring it overflowed a uint64 and reverted inside afterSwap.
-    ///      Every subsequent swap would then revert too, which is unrecoverable.
     function test_Exploit_LongIdleThenViolentMoveDoesNotBrickPool() public {
         _swap(true, -1 ether);
 
-        // Idle far past the horizon, then move the price hard in one go.
         vm.roll(block.number + 5000);
         _swap(true, -400 ether);
 
-        // The pool must still be usable afterwards.
         vm.roll(block.number + 1);
         _swap(false, -1 ether);
         vm.roll(block.number + 1);
@@ -287,12 +233,6 @@ contract IntegrationTest is Test, Deployers {
         assertGt(hook.poolState(id).varOneX32, 0, "estimator must survive the excursion");
     }
 
-    /// @notice U must reach kappa in the numeraire's base units, not in flow units.
-    /// @dev Depth is denominated in token base units and kappa compares sigma/(2U)
-    ///      against 2/D, so U has to be converted back out of the flowUnit scaling it is
-    ///      accumulated in. Omitting that made kappa wrong by a factor of flowUnit, which
-    ///      is 1e12 at the default -- large enough to pin kappa at its cap regardless of
-    ///      market conditions, which is indistinguishable from the mechanism working.
     function test_Kappa_UsesNumeraireUnitsNotFlowUnits() public {
         _makeDeep();
         for (uint256 i = 0; i <= HORIZON_K; i++) {
@@ -306,27 +246,9 @@ contract IntegrationTest is Test, Deployers {
         console2.log("kappa:", kappa);
         console2.log("kappa cap:", kappaMax);
 
-        // A kappa at or near its cap means the inputs are mis-scaled rather than that
-        // the pool genuinely wants maximum correction. Require real headroom, not just
-        // strict inequality: at wei denomination both lambda terms underflowed Q64.64,
-        // the open-loop anchor was zero, and the controller alone drove kappa to 98.9%
-        // of the cap. That passed a strict-inequality check while the Kyle core of the
-        // mechanism was contributing nothing at all.
         assertLt(kappa, kappaMax / 2, "kappa near its cap indicates a scaling error");
     }
 
-    /// @notice Route B must actually gate kappa, not merely be computed and discarded.
-    /// @dev Route A assumes Kyle equilibrium, in which informed and noise flow contribute
-    ///      exactly equally to flow variance, so its kappa is correct only at an informed
-    ///      share of one half. When Route B disagrees sharply the pool is not in that
-    ///      equilibrium and the open-loop kappa comes from a model that does not describe
-    ///      it, so kappa must be shrunk rather than trusted.
-    ///
-    ///      The covariance state is pinned directly. Cov1 = 0.5*Var(y) with
-    ///      Cov2 = 0.278*Var(y) implies Var(x) = Cov1^2/Cov2 = 0.9*Var(y), so Route B
-    ///      reads U as sqrt(0.1*Var(y)) against Route A's sqrt(0.5*Var(y)) -- a 124%
-    ///      divergence, well past the 50% bound. Constructing that through real swaps
-    ///      would need flow with a chosen serial correlation over thousands of blocks.
     function test_RouteB_DivergenceShrinksKappa() public {
         uint256 kappaAgreeing = _settleKappa(false);
         assertGt(kappaAgreeing, 0, "baseline kappa must be live for the test to mean anything");
@@ -339,8 +261,6 @@ contract IntegrationTest is Test, Deployers {
         assertLt(kappaDiverging, kappaAgreeing, "a divergent second opinion must shrink kappa");
     }
 
-    /// @dev Runs a pool to a converged kappa, optionally pinning a divergent Route B
-    ///      state before the final checkpoint.
     function _settleKappa(bool forceDivergence) internal returns (uint256) {
         setUp();
         _makeDeep();
@@ -350,9 +270,6 @@ contract IntegrationTest is Test, Deployers {
             _swap(i % 2 == 0, -5 ether);
         }
 
-        // Advance past the horizon WITHOUT swapping. Every swap that crosses a block
-        // boundary runs the covariance EWMA, so trading through the gap would decay a
-        // pinned state before the checkpoint ever reads it.
         vm.roll(block.number + HORIZON_K + 1);
 
         if (forceDivergence) {
@@ -360,29 +277,21 @@ contract IntegrationTest is Test, Deployers {
             hook.setFlowCov(vaneKey, int64(uint64(fv / 2)), int64(uint64((uint256(fv) * 278) / 1000)));
         }
 
-        // One swap: crosses the boundary and trips the checkpoint, so the pinned state
-        // takes a single EWMA step rather than twenty.
         _swap(true, -5 ether);
 
         return hook.kappaOf(id);
     }
 
-    /// @notice The belief must emerge from one-sided flow with no manual intervention.
-    ///         This is the whole mechanism running unaided.
     function test_Belief_EmergesFromOneSidedFlow() public {
-        // Give the controller a nonzero gain by letting the horizon elapse first.
         for (uint256 i = 0; i <= HORIZON_K; i++) {
             vm.roll(block.number + 1);
             _swap(i % 2 == 0, -0.5 ether);
         }
 
-        // Pin a kappa so the belief responds to flow at a measurable rate. kappa is
-        // otherwise set by market conditions the test does not control.
         hook.setKappa(vaneKey, uint64(uint256(1 << 64) / 1_000_000));
 
         int256 beliefBefore = hook.beliefOf(id);
 
-        // Sustained buying of the risky asset must push the belief positive.
         for (uint256 i = 0; i < 10; i++) {
             vm.roll(block.number + 1);
             _swap(false, -2 ether);
@@ -395,13 +304,12 @@ contract IntegrationTest is Test, Deployers {
         assertGt(beliefAfter, beliefBefore, "sustained buying must raise the belief");
     }
 
-    /// @notice Selling must move the belief the other way, from the same start.
     function test_Belief_SignFollowsFlowDirection() public {
         hook.setKappa(vaneKey, uint64(uint256(1 << 64) / 1_000_000));
 
         for (uint256 i = 0; i < 10; i++) {
             vm.roll(block.number + 1);
-            _swap(true, -2 ether); // sell the risky asset
+            _swap(true, -2 ether);
         }
 
         int256 belief = hook.beliefOf(id);
@@ -409,13 +317,10 @@ contract IntegrationTest is Test, Deployers {
         assertLt(belief, 0, "sustained selling must drive the belief negative");
     }
 
-    /// @notice With no flow the belief must decay toward zero, per eq (2.7). A belief
-    ///         that persists without evidence is a standing bias arbitrageurs farm.
     function test_Belief_DecaysWithoutFlow() public {
-        hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 200); // 50 bps
+        hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 200);
         int256 start = hook.beliefOf(id);
 
-        // Tiny swaps to advance blocks without meaningfully feeding the belief.
         for (uint256 i = 0; i < 15; i++) {
             vm.roll(block.number + 1);
             _swap(i % 2 == 0, -1000 wei);
@@ -429,12 +334,9 @@ contract IntegrationTest is Test, Deployers {
         assertGe(ended, 0, "decay must not overshoot through zero");
     }
 
-    /// @notice Graceful degradation, eq (5.2): an empty reserve turns the mechanism off
-    ///         rather than reverting. The pool must keep trading as a plain v4 pool.
     function test_Reserve_EmptyReserveDisablesBeliefWithoutReverting() public {
         hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 100);
 
-        // Burn the hook's claims so the reserve is genuinely empty.
         vm.startPrank(address(hook));
         manager.transfer(address(1), currency0.toId(), hook.reserveOf(currency0));
         manager.transfer(address(1), currency1.toId(), hook.reserveOf(currency1));
@@ -442,16 +344,13 @@ contract IntegrationTest is Test, Deployers {
         assertEq(hook.reserveOf(currency0), 0, "reserve must be empty");
 
         uint256 before0 = currency0.balanceOfSelf();
-        _swap(true, -1 ether); // would normally have the hook pay out
+        _swap(true, -1 ether);
         assertLt(currency0.balanceOfSelf(), before0, "swap must still execute");
     }
 
-    /// @notice A partially funded reserve must scale the belief down rather than
-    ///         applying it at full strength or turning it off entirely.
     function test_Reserve_PartialFundingScalesBelief() public {
         hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 100);
 
-        // Target is 100 ether; leave a tenth of it in claims.
         vm.startPrank(address(hook));
         manager.transfer(address(1), currency0.toId(), hook.reserveOf(currency0) - 10 ether);
         vm.stopPrank();
@@ -463,15 +362,12 @@ contract IntegrationTest is Test, Deployers {
         _swap(true, -1 ether);
     }
 
-    /// @notice The reserve is the hook's real balance, so an owner override must change
-    ///         the scaling decision without touching any internal counter.
     function test_Reserve_TargetOverrideIsRespected() public {
         assertEq(hook.targetFor(currency0), 100 ether, "default applies when unset");
         hook.setReserveTarget(currency0, 5 ether);
         assertEq(hook.targetFor(currency0), 5 ether, "override must take effect");
     }
 
-    /// @notice Invariant 6: two pools on the same hook must not share state.
     function test_NoCrossPoolContamination_UnderRealFlow() public {
         PoolKey memory second = PoolKey(currency0, currency1, 500, 10, IHooks(address(hook)));
         hook.allowPool(second);
@@ -490,8 +386,6 @@ contract IntegrationTest is Test, Deployers {
         assertEq(hook.poolState(second.toId()).varOneX32, 0, "untraded pool variance untouched");
     }
 
-    /// @notice Invariant 1 under the full pipeline, including block boundaries and
-    ///         horizon checkpoints. The earlier fuzz never crossed a block.
     function testFuzz_NeverRevertsAcrossBlocks(uint8 rawSwaps, uint128 rawAmount, bool startDirection) public {
         uint256 swaps = bound(uint256(rawSwaps), 1, 40);
         uint256 amount = bound(uint256(rawAmount), 1e6, 20 ether);
@@ -515,16 +409,6 @@ contract IntegrationTest is Test, Deployers {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Gas on the paths the earlier measurement never reached
-    // ------------------------------------------------------------------
-
-    /// @notice The first swap of a new block samples variance and decays the belief.
-    ///         Budget is 45,000 for beforeSwap and afterSwap combined, section 6.5.
-    /// @dev Measures the STEADY-STATE cost. The first block boundary additionally pays
-    ///      a zero-to-nonzero SSTORE on each state slot, which is 20,000 gas per slot and
-    ///      happens once in a pool's life; including it would report a recurring cost
-    ///      roughly 25,000 too high.
     function test_Gas_NewBlockSamplingPath() public {
         for (uint256 i = 0; i < 4; i++) {
             vm.roll(block.number + 1);
@@ -537,25 +421,15 @@ contract IntegrationTest is Test, Deployers {
         uint256 used = before - gasleft();
 
         console2.log("full swap gas, new-block sampling path:", used);
-        // The plain-pool baseline measured elsewhere is ~56k; the hook's share is the
-        // remainder and must fit the budget.
+
         assertLt(used, 56_131 + 45_000, "new-block path must fit the gas budget");
     }
 
-    /// @notice The true worst case: a horizon checkpoint on a block where the belief is
-    ///         also active, so the swap pays for variance sampling, the open-loop kappa,
-    ///         a controller step AND a token settlement at once.
-    /// @dev Measured against a PLAIN pool driven through the identical swap sequence,
-    ///      not against a fixed baseline. Pushing the price with large swaps makes the
-    ///      final swap cross more initialised ticks, and that cost belongs to the pool,
-    ///      not the hook. Diffing against a fresh-pool baseline attributes it to the hook
-    ///      and overstates the marginal cost by roughly 28,000 gas.
     function test_Gas_WorstCaseCheckpointWithActiveBelief() public {
         PoolKey memory plainKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(0)));
         manager.initialize(plainKey, SQRT_PRICE_1_1);
         modifyLiquidityRouter.modifyLiquidity(plainKey, ModifyLiquidityParams(-60000, 60000, 5000 ether, 0), "");
 
-        // Drive both pools through the same history so the curve state matches.
         for (uint256 i = 0; i < HORIZON_K - 1; i++) {
             vm.roll(block.number + 1);
             _swap(true, -5 ether);
@@ -577,29 +451,9 @@ contract IntegrationTest is Test, Deployers {
         console2.log("vane pool, checkpoint + active belief:", vaneGas);
         console2.log("marginal hook cost:", vaneGas - plainGas);
 
-        // This path exceeds the 45,000 budget in section 6.5 and is asserted against its
-        // own measured bound instead, as a deliberate and recorded exception rather than
-        // a silently relaxed budget. Every other path is comfortably inside 45,000: the
-        // dust path costs 9,189, the active-belief path 19,829, and a lone checkpoint
-        // roughly 28,600.
-        //
-        // Reaching this path requires a horizon checkpoint AND an active belief to fall
-        // on the same block, which happens at most once per horizonK blocks and only
-        // while the belief is nonzero.
-        //
-        // Route B accounts for 6,371 of the overage. Section 6.5 says a component
-        // costing more than 5,000 gas must earn it in the simulator or be cut, and the
-        // simulator does not exist until M6, so by the specification's own rule this is
-        // undecided rather than settled. It is kept for now because section 3.2 argues
-        // the divergence check is worth more in an audit than another feature, and
-        // because the estimator it guards -- Route A's kappa -- is only correct at an
-        // informed share of one half.
         assertLt(vaneGas - plainGas, 54_000, "worst case must stay within its recorded bound");
     }
 
-    /// @notice Isolates the checkpoint cost from the settlement cost at the SAME pool
-    ///         state, so the two can be attributed rather than inferred from tests run
-    ///         at different prices.
     function test_Gas_AttributionAtIdenticalState() public {
         for (uint256 i = 0; i < HORIZON_K - 1; i++) {
             vm.roll(block.number + 1);
@@ -609,14 +463,12 @@ contract IntegrationTest is Test, Deployers {
 
         uint256 snap = vm.snapshotState();
 
-        // Arm A: checkpoint fires, belief zero, so no settlement.
         uint256 b1 = gasleft();
         _swap(true, -1 ether);
         uint256 checkpointOnly = b1 - gasleft();
 
         vm.revertToState(snap);
 
-        // Arm B: checkpoint fires AND belief active, so settlement too.
         hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 100);
         uint256 b2 = gasleft();
         _swap(true, -1 ether);
@@ -627,8 +479,6 @@ contract IntegrationTest is Test, Deployers {
         console2.log("settlement attributable  :", checkpointPlusSettle - checkpointOnly);
     }
 
-    /// @notice The horizon checkpoint is the most expensive path: it reads pool state,
-    ///         recomputes the open-loop kappa and steps the controller.
     function test_Gas_HorizonCheckpointPath() public {
         for (uint256 i = 0; i < HORIZON_K; i++) {
             vm.roll(block.number + 1);

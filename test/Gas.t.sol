@@ -16,9 +16,6 @@ import {VaneHook} from "../src/VaneHook.sol";
 import {VaneHookHarness} from "./utils/VaneHookHarness.sol";
 import {Fixtures} from "./utils/Fixtures.sol";
 
-/// @notice Measures the hook's marginal gas cost against the plain-pool baseline, so the
-///         section 6.5 budget of 45,000 gas for beforeSwap + afterSwap can be checked
-///         rather than assumed.
 contract GasTest is Test, Deployers {
     VaneHookHarness internal hook;
     PoolKey internal vaneKey;
@@ -69,10 +66,7 @@ contract GasTest is Test, Deployers {
         gasUsed = before - gasleft();
     }
 
-    /// @notice The dust path: with the belief at zero the hook returns early, so the
-    ///         marginal cost is only the callback dispatch. Most swaps take this path.
     function test_Gas_ZeroBeliefPath() public {
-        // Warm both pools so storage-warming does not distort the comparison.
         _measure(plainKey);
         _measure(vaneKey);
 
@@ -86,8 +80,6 @@ contract GasTest is Test, Deployers {
         assertLt(vaneGas - plainGas, GAS_BUDGET, "zero-belief path must fit the budget");
     }
 
-    /// @notice The active path: belief nonzero, so the hook computes the offset and
-    ///         settles a token transfer. This is the expensive case that must fit.
     function test_Gas_ActiveBeliefPath() public {
         _measure(plainKey);
         hook.setBelief(vaneKey, DELTA_100BPS);

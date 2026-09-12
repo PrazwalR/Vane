@@ -17,10 +17,6 @@ import {VaneConfig, VaneConfigLib} from "../src/config/VaneConfig.sol";
 import {HookMiner} from "../script/HookMiner.sol";
 import {VaneParameters} from "../script/VaneParameters.sol";
 
-/// @notice The deployment path itself, exercised rather than assumed. A hook whose
-///         address carries the wrong flags is never called for the callbacks it
-///         implements, and nothing reverts to say so, so this is checked with a real
-///         CREATE2 deployment and a real swap.
 contract DeployTest is Test, Deployers {
     address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
@@ -34,10 +30,6 @@ contract DeployTest is Test, Deployers {
         deployMintAndApprove2Currencies();
     }
 
-    /// @dev Deploys through the canonical CREATE2 factory rather than with a salted
-    ///      `new`, because that is what the script does. A salted `new` inside a test
-    ///      uses the test contract as the deployer, so the salt mined for the factory
-    ///      produces a different address and the test would validate a path nobody runs.
     function _mineAndDeploy() internal returns (VaneHook hook) {
         VaneConfig memory config = VaneParameters.config();
         bytes memory args = abi.encode(IPoolManager(address(manager)), config, address(this));
@@ -52,15 +44,10 @@ contract DeployTest is Test, Deployers {
         hook = VaneHook(mined);
     }
 
-    /// @notice The shipped parameter set must pass its own validator. A deploy script
-    ///         that mines for a minute and then reverts in the constructor is a slow way
-    ///         to discover a bad parameter.
     function test_Deploy_ShippedParametersAreValid() public pure {
         VaneConfigLib.validate(VaneParameters.config());
     }
 
-    /// @notice The mined address must carry exactly the five permissions in section 6.3.
-    ///         Extra flags make v4 call into selectors the hook does not implement.
     function test_Deploy_MinedAddressCarriesExactlyTheExpectedFlags() public {
         VaneHook hook = _mineAndDeploy();
 
@@ -72,10 +59,6 @@ contract DeployTest is Test, Deployers {
         assertEq(actual, EXPECTED_FLAGS, "flags must match exactly, not merely overlap");
     }
 
-    /// @notice None of the liquidity or donate permissions may be set. Invariant 11: a
-    ///         hook on add or remove liquidity could trap LPs, so the address must make
-    ///         that structurally impossible rather than rely on the callbacks being
-    ///         no-ops.
     function test_Deploy_LiquidityPermissionsAreStructurallyAbsent() public {
         VaneHook hook = _mineAndDeploy();
         uint160 addr = uint160(address(hook));
@@ -88,8 +71,6 @@ contract DeployTest is Test, Deployers {
         assertEq(addr & Hooks.AFTER_DONATE_FLAG, 0, "no afterDonate");
     }
 
-    /// @notice The full path: mine, deploy, allowlist, initialise, add liquidity, swap.
-    ///         This is the M0 exit criterion.
     function test_Deploy_EndToEndSwapThroughDeployedHook() public {
         VaneHook hook = _mineAndDeploy();
 
@@ -110,9 +91,6 @@ contract DeployTest is Test, Deployers {
         assertGt(currency1.balanceOfSelf(), before, "a swap must execute through the deployed hook");
     }
 
-    /// @notice beforeInitialize must reject a pool that was not allowlisted, so the
-    ///         deploy script's ordering is enforced by the contract rather than by
-    ///         convention. Threat 8.
     function test_Deploy_InitializeRevertsWithoutAllowlist() public {
         VaneHook hook = _mineAndDeploy();
         PoolKey memory key = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
@@ -121,7 +99,6 @@ contract DeployTest is Test, Deployers {
         manager.initialize(key, SQRT_PRICE_1_1);
     }
 
-    /// @notice Only the deployer may allowlist pools.
     function test_Deploy_AllowlistIsOwnerOnly() public {
         VaneHook hook = _mineAndDeploy();
         PoolKey memory key = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));

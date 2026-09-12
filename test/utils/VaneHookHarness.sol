@@ -10,12 +10,6 @@ import {VaneConfig} from "../../src/config/VaneConfig.sol";
 import {PoolStateLib, PoolState, PoolStateAux} from "../../src/libraries/PoolStateLib.sol";
 import {FlowCovState} from "../../src/libraries/FlowAutocovariance.sol";
 
-/// @notice Test-only access to the hook's packed state.
-/// @dev VaneHook exposes no way to write a belief from outside, because an externally
-///      settable belief would be an operator-controlled price and would reintroduce the
-///      trust assumption the mechanism exists to remove. Tests that need to pin a belief
-///      to isolate one behaviour use this harness instead, which lives under test/ and
-///      is unreachable from src/.
 contract VaneHookHarness is VaneHook {
     using PoolIdLibrary for PoolKey;
 
@@ -35,9 +29,6 @@ contract VaneHookHarness is VaneHook {
         _aux[id] = PoolStateLib.packAux(a);
     }
 
-    /// @notice Pins the Route B autocovariance state so the divergence check can be
-    ///         driven directly, rather than by constructing flow with a chosen serial
-    ///         correlation through hundreds of real swaps.
     function setFlowCov(PoolKey calldata key, int64 cov1, int64 cov2) external {
         FlowCovState storage st = _flowCov[key.toId()];
         st.cov1 = cov1;

@@ -7,18 +7,12 @@ import {FlowAutocovariance, FlowCovState} from "../src/libraries/FlowAutocovaria
 import {FlowVariance} from "../src/libraries/FlowVariance.sol";
 import {Q64x64} from "../src/libraries/Q64x64.sol";
 
-/// @notice Route B, the autocovariance decomposition. The property that matters is that
-///         rho_x is recovered from observable flow rather than supplied as a free
-///         parameter, and that the estimator abstains when it has no signal.
 contract RouteBTest is Test {
-    uint64 internal constant LAMBDA = uint64((uint256(999) << 32) / 1000); // 0.999
+    uint64 internal constant LAMBDA = uint64((uint256(999) << 32) / 1000);
     uint256 internal constant ONE_X32 = 1 << 32;
-    /// @dev Three standard errors of the covariance EWMA, derived from lambda rather
-    ///      than chosen. See FlowAutocovariance.minCovRatioX32.
+
     uint256 internal constant Z = 3;
 
-    /// @dev Deterministic AR(1) informed flow plus i.i.d. noise, mirroring the model in
-    ///      eq (3.4). Not a security primitive; it drives a numerical property test.
     function _flowSeries(uint256 n, int256 rhoPct, int256 noiseScale, uint256 seed)
         internal
         pure
@@ -42,12 +36,7 @@ contract RouteBTest is Test {
         }
     }
 
-    /// @notice rho_x = Cov2 / Cov1 must recover the true serial correlation with no free
-    ///         parameter. This is what makes Route B falsifiable at all.
     function test_RouteB_RecoversRhoWithoutAFreeParameter() public pure {
-        // rho must be large enough to identify at this lambda. Cov2 = rho^2 * Var(x)
-        // shrinks quadratically, so weakly correlated informed flow needs more history
-        // than a test can run; that regime is covered by the abstention test below.
         int256[2] memory rhos = [int256(60), 75];
         for (uint256 j = 0; j < rhos.length; j++) {
             (FlowCovState memory st,) = _run(_flowSeries(8000, rhos[j], 600, 11 + j));
@@ -61,8 +50,6 @@ contract RouteBTest is Test {
         }
     }
 
-    /// @notice With rho identified, U follows from eq (3.4') and must track the true
-    ///         noise scale, which Route A cannot do away from Kyle equilibrium.
     function test_RouteB_RecoversNoiseScale() public pure {
         (FlowCovState memory st, uint64 flowVar) = _flowSeriesAndRun(50, 800, 21);
 
@@ -84,22 +71,9 @@ contract RouteBTest is Test {
         return _run(_flowSeries(6000, rhoPct, noise, seed));
     }
 
-    /// @notice The two routes must agree near Kyle equilibrium and diverge away from it.
-    /// @dev Route A assumes informed and noise flow contribute EXACTLY equally to flow
-    ///      variance, which is what Kyle equilibrium predicts, so U_A is correct only at
-    ///      an informed share of one half. Route B assumes only that noise is serially
-    ///      uncorrelated and holds across the range. Their gap is therefore a direct
-    ///      measure of how far the pool sits from the model Route A relies on -- the
-    ///      safety valve section 3.2 asks for.
-    ///
-    ///      Both arms must be identified for the comparison to mean anything. A pool so
-    ///      noise-dominated that Route B abstains produces a divergence of zero, which
-    ///      reads as "no second opinion", not as agreement.
     function test_RouteB_DivergenceGrowsAwayFromEquilibrium() public pure {
-        // Informed share near one half: Var(u) tuned to match Var(x), so Route A's
-        // assumption roughly holds and the two estimates should be close.
         (FlowCovState memory sEq, uint64 vEq) = _flowSeriesAndRun(70, 1400, 31);
-        // Informed-dominated: Route A's equal-contribution assumption is badly wrong.
+
         (FlowCovState memory sFar, uint64 vFar) = _flowSeriesAndRun(70, 300, 32);
 
         uint256 uBeq = FlowAutocovariance.noiseScale(sEq, vEq, FlowAutocovariance.minCovRatioX32(LAMBDA, Z));
@@ -116,10 +90,7 @@ contract RouteBTest is Test {
         assertGt(dFar, dEq, "divergence must grow as the pool leaves equilibrium");
     }
 
-    /// @notice With no serial structure the estimator must ABSTAIN rather than emit
-    ///         noise over noise. Cov1 near zero means rho is not identified.
     function test_RouteB_AbstainsWhenNotIdentified() public pure {
-        // rho = 0: informed flow carries no serial correlation at all.
         (FlowCovState memory st, uint64 flowVar) = _flowSeriesAndRun(0, 2000, 41);
 
         console2.log("cov1:", st.cov1);
@@ -136,8 +107,6 @@ contract RouteBTest is Test {
         );
     }
 
-    /// @notice A fresh pool has no history, so the estimator must abstain rather than
-    ///         divide by a zero covariance.
     function test_RouteB_AbstainsOnEmptyState() public pure {
         FlowCovState memory st;
         assertFalse(
@@ -152,16 +121,13 @@ contract RouteBTest is Test {
         );
     }
 
-    /// @notice rho above one would mean a non-stationary informed process, which the
-    ///         AR(1) picture does not describe. The estimator must reject it.
     function test_RouteB_RejectsNonStationaryRho() public pure {
         FlowCovState memory st;
         st.cov1 = 1000;
-        st.cov2 = 2000; // implies rho = 2
+        st.cov2 = 2000;
         assertFalse(FlowAutocovariance.isIdentified(st, 100_000, 0), "rho above one must be rejected");
     }
 
-    /// @notice The state must never revert, whatever flow it is fed.
     function testFuzz_RouteB_NeverReverts(int64 f1, int64 f2, int64 f3, uint64 flowVar) public pure {
         FlowCovState memory st;
         st = FlowAutocovariance.update(st, f1, LAMBDA);
