@@ -30,8 +30,6 @@ struct VaneConfig {
 
     uint128 reserveTargetDefault;
 
-    uint16 safetyFactorBps;
-
     uint64 maxEstimatorDivergenceX32;
 
     uint64 routeBZScore;
@@ -58,11 +56,11 @@ library VaneConfigLib {
     error Vane__DeadbandTooLarge();
     error Vane__KappaMaxZero();
     error Vane__DeltaMaxZero();
+    error Vane__DeltaMaxTooLarge();
     error Vane__DeltaDustNotBelowMax();
     error Vane__MaxTickDeltaOutOfRange();
     error Vane__FlowUnitOutOfRange();
     error Vane__ReserveTargetZero();
-    error Vane__SafetyFactorTooLow();
     error Vane__MaxDivergenceZero();
     error Vane__RouteBZScoreTooLow();
 
@@ -90,6 +88,7 @@ library VaneConfigLib {
 
         if (c.kappaMaxX64 == 0) revert Vane__KappaMaxZero();
         if (c.deltaMaxX64 == 0) revert Vane__DeltaMaxZero();
+        if (c.deltaMaxX64 > uint64(type(int64).max)) revert Vane__DeltaMaxTooLarge();
         if (c.deltaDustX64 >= c.deltaMaxX64) revert Vane__DeltaDustNotBelowMax();
 
         if (c.maxTickDelta <= 0 || c.maxTickDelta > MAX_ALLOWED_TICK_DELTA) {
@@ -101,7 +100,6 @@ library VaneConfigLib {
         }
 
         if (c.reserveTargetDefault == 0) revert Vane__ReserveTargetZero();
-        if (c.safetyFactorBps < 10_000) revert Vane__SafetyFactorTooLow();
 
         if (c.maxEstimatorDivergenceX32 == 0) revert Vane__MaxDivergenceZero();
 

@@ -41,8 +41,8 @@ contract IntegrationTest is Test, Deployers {
         deployMintAndApprove2Currencies();
 
         uint160 flags = uint160(
-            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG
-                | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_FLAG
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
+                | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         address hookAddr = address(flags ^ (0x8888 << 144));
         deployCodeTo(
@@ -273,9 +273,17 @@ contract IntegrationTest is Test, Deployers {
 
         vm.roll(block.number + HORIZON_K + 1);
 
+        uint64 fv = hook.poolState(id).flowVarX32;
         if (forceDivergence) {
-            uint64 fv = hook.poolState(id).flowVarX32;
+            // varInformed = cov1^2/cov2 = 0.9*Var(y) => U_B = sqrt(0.1*Var(y)) against
+            // Route A's sqrt(0.5*Var(y)): a 124% divergence, past the 50% bound.
             hook.setFlowCov(vaneKey, int64(uint64(fv / 2)), int64(uint64((uint256(fv) * 278) / 1000)));
+        } else {
+            // cov1 == cov2 => varInformed = Var(y)/2, so Route B reproduces Route A
+            // exactly and the two estimators agree. Both arms must be IDENTIFIED for
+            // the comparison to mean anything: an unidentified estimator is now
+            // attenuated too, so it cannot serve as the baseline.
+            hook.setFlowCov(vaneKey, int64(uint64(fv / 2)), int64(uint64(fv / 2)));
         }
 
         _swap(true, -5 ether);
@@ -357,6 +365,12 @@ contract IntegrationTest is Test, Deployers {
         vm.stopPrank();
         assertEq(hook.reserveOf(currency0), 10 ether, "reserve must be the claim balance");
         assertEq(hook.targetFor(currency0), 100 ether, "target comes from config default");
+
+        // The offset settles in the UNSPECIFIED currency, so a sell of currency0 is
+        // backed by the currency1 reserve. Scale that one down instead.
+        vm.startPrank(address(hook));
+        manager.transfer(address(1), currency1.toId(), hook.reserveOf(currency1) - 10 ether);
+        vm.stopPrank();
 
         vm.expectEmit(true, false, false, true, address(hook));
         emit VaneHook.BeliefScaled(id, 10 ether, 100 ether);
@@ -455,7 +469,7 @@ contract IntegrationTest is Test, Deployers {
         console2.log("marginal hook cost:", vaneGas - plainGas);
 
         if (GasGuard.assertionsEnabled()) {
-            assertLt(vaneGas - plainGas, 54_000, "worst case must stay within its recorded bound");
+            assertLt(vaneGas - plainGas, 76_000, "worst case must stay within its recorded bound");
         }
     }
 

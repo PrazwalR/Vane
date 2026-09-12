@@ -8,6 +8,7 @@ import {DepthLib} from "../src/libraries/DepthLib.sol";
 import {KappaLib} from "../src/libraries/KappaLib.sol";
 import {Q64x64} from "../src/libraries/Q64x64.sol";
 import {VaneConfig, VaneConfigLib} from "../src/config/VaneConfig.sol";
+import {VaneParameters} from "../script/VaneParameters.sol";
 
 contract ConfigHarness {
     function validate(VaneConfig memory c) external pure {
@@ -28,24 +29,7 @@ contract DepthAndConfigTest is Test {
     uint64 internal constant UNIT_FLOW = 1;
 
     function _validConfig() internal pure returns (VaneConfig memory c) {
-        c = VaneConfig({
-            thetaX64: uint64(ONE_X64 / 20),
-            varLambdaX32: uint64((uint256(99) * ONE_X32) / 100),
-            flowLambdaX32: uint64((uint256(99) * ONE_X32) / 100),
-            horizonK: 20,
-            controllerGainX32: uint64(ONE_X32 / 100),
-            controllerLeakX32: uint64(ONE_X32 / 100),
-            controllerDeadbandX32: 0,
-            kappaMaxX64: uint64(ONE_X64 / 1000),
-            deltaMaxX64: uint64(ONE_X64 / 100),
-            deltaDustX64: uint64(ONE_X64 / 100_000),
-            maxTickDelta: 2000,
-            flowUnit: 1e12,
-            reserveTargetDefault: 100 ether,
-            safetyFactorBps: 20_000,
-            maxEstimatorDivergenceX32: uint64(ONE_X32 / 2),
-            routeBZScore: 3
-        });
+        c = VaneParameters.config();
     }
 
     function test_Depth_AtUnitPriceEqualsLiquidity() public pure {
@@ -178,13 +162,6 @@ contract DepthAndConfigTest is Test {
 
         c.maxTickDelta = 9000;
         vm.expectRevert(VaneConfigLib.Vane__MaxTickDeltaOutOfRange.selector);
-        harness.validate(c);
-    }
-
-    function test_Config_RevertsOnLowSafetyFactor() public {
-        VaneConfig memory c = _validConfig();
-        c.safetyFactorBps = 9_999;
-        vm.expectRevert(VaneConfigLib.Vane__SafetyFactorTooLow.selector);
         harness.validate(c);
     }
 

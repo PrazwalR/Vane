@@ -58,7 +58,16 @@ library FlowAutocovariance {
         uint256 varInformed = (c1 * c1) / c2;
 
         if (varInformed >= uint256(flowVar)) return 0;
-        return Q64x64.sqrt((uint256(flowVar) - varInformed) / 1);
+        return Q64x64.sqrt(uint256(flowVar) - varInformed);
+    }
+
+    function attenuate(uint256 kappaX64, uint256 maxDivergenceX32, uint256 divergenceX32_)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (divergenceX32_ <= maxDivergenceX32) return kappaX64;
+        return (kappaX64 * maxDivergenceX32) / divergenceX32_;
     }
 
     function divergenceX32(uint256 noiseA, uint256 noiseB) internal pure returns (uint256) {

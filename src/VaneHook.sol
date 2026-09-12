@@ -34,13 +34,21 @@ contract VaneHook is IHooks, IUnlockCallback {
     error Vane__PoolNotAllowlisted();
     error Vane__NotOwner();
     error Vane__OwnerIsZero();
-    error Vane__UnexpectedCallbackReturn();
+    error Vane__RecipientIsZero();
 
     event BeliefUpdated(PoolId indexed poolId, int256 deltaX64, uint256 kappaX64, uint256 varianceRatioX32);
 
     event EstimatorDivergence(PoolId indexed poolId, uint256 noiseA, uint256 noiseB, uint256 divergenceX32);
 
+    event ReserveFunded(Currency indexed currency, uint256 amount, address indexed from);
+    event ReserveWithdrawn(Currency indexed currency, uint256 amount, address indexed to);
+
     event BeliefScaled(PoolId indexed poolId, uint256 scaleNumerator, uint256 scaleDenominator);
+
+    uint256 private constant UNIDENTIFIED_PENALTY_X32 = uint256(1 << 32) * 2;
+
+    uint8 private constant FUND = 0;
+    uint8 private constant WITHDRAW = 1;
 
     IPoolManager public immutable POOL_MANAGER;
     address public immutable OWNER;
@@ -66,6 +74,7 @@ contract VaneHook is IHooks, IUnlockCallback {
     mapping(PoolId => bytes32) internal _aux;
 
     mapping(PoolId => FlowCovState) internal _flowCov;
+    mapping(PoolId => uint128) internal _checkpointLiquidity;
 
     mapping(PoolId => bool) public allowlisted;
 
@@ -76,28 +85,28 @@ contract VaneHook is IHooks, IUnlockCallback {
         _;
     }
 
-    constructor(IPoolManager manager, VaneConfig memory config, address owner) {
-        VaneConfigLib.validate(config);
+    constructor(IPoolManager manager, VaneConfig memory vaneConfig, address owner) {
+        VaneConfigLib.validate(vaneConfig);
         if (owner == address(0)) revert Vane__OwnerIsZero();
 
         POOL_MANAGER = manager;
         OWNER = owner;
 
-        THETA_X64 = config.thetaX64;
-        VAR_LAMBDA_X32 = config.varLambdaX32;
-        FLOW_LAMBDA_X32 = config.flowLambdaX32;
-        HORIZON_K = config.horizonK;
-        CONTROLLER_GAIN_X32 = config.controllerGainX32;
-        CONTROLLER_LEAK_X32 = config.controllerLeakX32;
-        CONTROLLER_DEADBAND_X32 = config.controllerDeadbandX32;
-        KAPPA_MAX_X64 = config.kappaMaxX64;
-        DELTA_MAX_X64 = config.deltaMaxX64;
-        DELTA_DUST_X64 = config.deltaDustX64;
-        MAX_TICK_DELTA = config.maxTickDelta;
-        FLOW_UNIT = config.flowUnit;
-        RESERVE_TARGET_DEFAULT = config.reserveTargetDefault;
-        MAX_DIVERGENCE_X32 = config.maxEstimatorDivergenceX32;
-        ROUTE_B_Z_SCORE = config.routeBZScore;
+        THETA_X64 = vaneConfig.thetaX64;
+        VAR_LAMBDA_X32 = vaneConfig.varLambdaX32;
+        FLOW_LAMBDA_X32 = vaneConfig.flowLambdaX32;
+        HORIZON_K = vaneConfig.horizonK;
+        CONTROLLER_GAIN_X32 = vaneConfig.controllerGainX32;
+        CONTROLLER_LEAK_X32 = vaneConfig.controllerLeakX32;
+        CONTROLLER_DEADBAND_X32 = vaneConfig.controllerDeadbandX32;
+        KAPPA_MAX_X64 = vaneConfig.kappaMaxX64;
+        DELTA_MAX_X64 = vaneConfig.deltaMaxX64;
+        DELTA_DUST_X64 = vaneConfig.deltaDustX64;
+        MAX_TICK_DELTA = vaneConfig.maxTickDelta;
+        FLOW_UNIT = vaneConfig.flowUnit;
+        RESERVE_TARGET_DEFAULT = vaneConfig.reserveTargetDefault;
+        MAX_DIVERGENCE_X32 = vaneConfig.maxEstimatorDivergenceX32;
+        ROUTE_B_Z_SCORE = vaneConfig.routeBZScore;
     }
 
     function allowPool(PoolKey calldata key) external {
@@ -106,19 +115,32 @@ contract VaneHook is IHooks, IUnlockCallback {
     }
 
     function fundReserve(Currency currency, uint256 amount) external {
-        bytes memory result = POOL_MANAGER.unlock(abi.encode(msg.sender, currency, amount));
-        if (result.length != 0) revert Vane__UnexpectedCallbackReturn();
+        POOL_MANAGER.unlock(abi.encode(FUND, msg.sender, currency, amount));
+        emit ReserveFunded(currency, amount, msg.sender);
     }
 
     function unlockCallback(bytes calldata data) external override returns (bytes memory) {
         if (msg.sender != address(POOL_MANAGER)) revert Vane__NotPoolManager();
 
-        (address payer, Currency currency, uint256 amount) = abi.decode(data, (address, Currency, uint256));
+        (uint8 action, address counterparty, Currency currency, uint256 amount) =
+            abi.decode(data, (uint8, address, Currency, uint256));
 
-        currency.settle(POOL_MANAGER, payer, amount, false);
-        currency.take(POOL_MANAGER, address(this), amount, true);
+        if (action == FUND) {
+            currency.settle(POOL_MANAGER, counterparty, amount, false);
+            currency.take(POOL_MANAGER, address(this), amount, true);
+        } else {
+            currency.settle(POOL_MANAGER, address(this), amount, true);
+            currency.take(POOL_MANAGER, counterparty, amount, false);
+        }
 
         return "";
+    }
+
+    function withdrawReserve(Currency currency, uint256 amount, address recipient) external {
+        if (msg.sender != OWNER) revert Vane__NotOwner();
+        if (recipient == address(0)) revert Vane__RecipientIsZero();
+        POOL_MANAGER.unlock(abi.encode(WITHDRAW, recipient, currency, amount));
+        emit ReserveWithdrawn(currency, amount, recipient);
     }
 
     function setReserveTarget(Currency currency, uint256 target) external {
@@ -141,6 +163,30 @@ contract VaneHook is IHooks, IUnlockCallback {
 
     function kappaOf(PoolId id) external view returns (uint256) {
         return PoolStateLib.unpackAux(_aux[id]).kappaX64;
+    }
+
+    function config() external view returns (VaneConfig memory) {
+        return VaneConfig({
+            thetaX64: THETA_X64,
+            varLambdaX32: VAR_LAMBDA_X32,
+            flowLambdaX32: FLOW_LAMBDA_X32,
+            horizonK: HORIZON_K,
+            controllerGainX32: CONTROLLER_GAIN_X32,
+            controllerLeakX32: CONTROLLER_LEAK_X32,
+            controllerDeadbandX32: CONTROLLER_DEADBAND_X32,
+            kappaMaxX64: KAPPA_MAX_X64,
+            deltaMaxX64: DELTA_MAX_X64,
+            deltaDustX64: DELTA_DUST_X64,
+            maxTickDelta: MAX_TICK_DELTA,
+            flowUnit: FLOW_UNIT,
+            reserveTargetDefault: RESERVE_TARGET_DEFAULT,
+            maxEstimatorDivergenceX32: MAX_DIVERGENCE_X32,
+            routeBZScore: ROUTE_B_Z_SCORE
+        });
+    }
+
+    function flowCovOf(PoolId id) external view returns (FlowCovState memory) {
+        return _flowCov[id];
     }
 
     function poolState(PoolId id) external view returns (PoolState memory) {
@@ -183,36 +229,13 @@ contract VaneHook is IHooks, IUnlockCallback {
         return IHooks.afterInitialize.selector;
     }
 
-    function beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata)
+    function beforeSwap(address, PoolKey calldata, SwapParams calldata, bytes calldata)
         external
+        pure
         override
-        onlyPoolManager
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        PoolId id = key.toId();
-        int256 d = PoolStateLib.unpackState(_state[id]).deltaX64;
-        if (d == 0) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-
-        Currency specified = _specifiedCurrency(key, params);
-
-        bool hookTakes = params.zeroForOne ? (d < 0) : (d > 0);
-        if (!hookTakes) d = _scaleForReserve(id, d, specified);
-
-        if (d > int256(uint256(DELTA_MAX_X64))) d = int256(uint256(DELTA_MAX_X64));
-        if (d < -int256(uint256(DELTA_MAX_X64))) d = -int256(uint256(DELTA_MAX_X64));
-
-        if (Q64x64.abs(d) < uint256(DELTA_DUST_X64)) {
-            return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-        }
-
-        int128 hookDeltaSpecified = _computeOffset(params, d);
-        if (hookDeltaSpecified == 0) {
-            return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-        }
-
-        _settleOrTake(specified, hookDeltaSpecified);
-
-        return (IHooks.beforeSwap.selector, toBeforeSwapDelta(hookDeltaSpecified, 0), 0);
+        return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
     function afterSwap(address, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
@@ -225,8 +248,10 @@ contract VaneHook is IHooks, IUnlockCallback {
         PoolState memory s = PoolStateLib.unpackState(_state[id]);
         PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id]);
 
-        int256 amount1 = int256(delta.amount1());
-        int256 signedNotional = params.zeroForOne ? -_abs(amount1) : _abs(amount1);
+        int128 hookDeltaUnspecified = _applyOffset(id, key, params, delta, s.deltaX64);
+
+        int256 magnitude1 = int256(Q64x64.abs(int256(delta.amount1())));
+        int256 signedNotional = params.zeroForOne ? -magnitude1 : magnitude1;
         a.flowAccum = FlowVariance.accumulate(a.flowAccum, FlowVariance.toFlowUnits(signedNotional, FLOW_UNIT));
 
         if (uint32(block.number) != s.lastBlock) {
@@ -261,7 +286,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         _state[id] = PoolStateLib.packState(s);
         _aux[id] = PoolStateLib.packAux(a);
 
-        return (IHooks.afterSwap.selector, int128(0));
+        return (IHooks.afterSwap.selector, hookDeltaUnspecified);
     }
 
     function _stepHorizon(PoolId id, PoolState memory s, PoolStateAux memory a, int24 tickNow, uint160 sqrtPriceX96)
@@ -279,7 +304,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         uint256 sigmaX64 = HorizonVariance.sigmaX64(a.varKX32, horizon);
         uint256 noiseX64 = FlowVariance.noiseScaleX64(s.flowVarX32);
 
-        uint256 depth = DepthLib.depthX64(POOL_MANAGER.getLiquidity(id), sqrtPriceX96, FLOW_UNIT);
+        uint256 depth = DepthLib.depthX64(_manipulationResistantLiquidity(id), sqrtPriceX96, FLOW_UNIT);
 
         uint256 openLoop = KappaLib.kappaX64(depth, sigmaX64, noiseX64, KAPPA_MAX_X64);
         openLoop = _applyDivergenceCheck(id, s.flowVarX32, openLoop);
@@ -309,10 +334,21 @@ contract VaneHook is IHooks, IUnlockCallback {
         return (s, a, vrX32);
     }
 
+    function _manipulationResistantLiquidity(PoolId id) private returns (uint128) {
+        uint128 liquidityNow = POOL_MANAGER.getLiquidity(id);
+        uint128 liquidityPrev = _checkpointLiquidity[id];
+        _checkpointLiquidity[id] = liquidityNow;
+
+        if (liquidityPrev == 0) return liquidityNow;
+        return liquidityPrev < liquidityNow ? liquidityPrev : liquidityNow;
+    }
+
     function _applyDivergenceCheck(PoolId id, uint64 flowVar, uint256 openLoop) private returns (uint256) {
         uint256 minRatio = FlowAutocovariance.minCovRatioX32(FLOW_LAMBDA_X32, ROUTE_B_Z_SCORE);
         uint256 noiseB = FlowAutocovariance.noiseScale(_flowCov[id], flowVar, minRatio);
-        if (noiseB == 0) return openLoop;
+        if (noiseB == 0) {
+            return FlowAutocovariance.attenuate(openLoop, MAX_DIVERGENCE_X32, UNIDENTIFIED_PENALTY_X32);
+        }
 
         uint256 noiseA = FlowVariance.noiseScale(flowVar);
         uint256 divergence = FlowAutocovariance.divergenceX32(noiseA, noiseB);
@@ -320,7 +356,7 @@ contract VaneHook is IHooks, IUnlockCallback {
 
         emit EstimatorDivergence(id, noiseA, noiseB, divergence);
 
-        return (openLoop * uint256(MAX_DIVERGENCE_X32)) / divergence;
+        return FlowAutocovariance.attenuate(openLoop, MAX_DIVERGENCE_X32, divergence);
     }
 
     function _scaleForReserve(PoolId id, int256 d, Currency payCurrency) private returns (int256) {
@@ -332,19 +368,55 @@ contract VaneHook is IHooks, IUnlockCallback {
         return BeliefState.scaleForReserve(d, reserve, target);
     }
 
-    function _computeOffset(SwapParams calldata params, int256 d) private pure returns (int128) {
-        uint256 magnitude =
-            params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
+    function _applyOffset(
+        PoolId id,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        BalanceDelta delta,
+        int256 storedDelta
+    ) private returns (int128) {
+        int256 d = storedDelta;
+        if (d == 0) return 0;
 
-        uint256 amount = OffsetDelta.offsetAmount(magnitude, d);
-        if (amount == 0) return 0;
+        Currency unspecified = _unspecifiedCurrency(key, params);
 
         bool hookTakes = params.zeroForOne ? (d < 0) : (d > 0);
-        return hookTakes ? int128(int256(amount)) : -int128(int256(amount));
+        if (!hookTakes) d = _scaleForReserve(id, d, unspecified);
+
+        if (d > int256(uint256(DELTA_MAX_X64))) d = int256(uint256(DELTA_MAX_X64));
+        if (d < -int256(uint256(DELTA_MAX_X64))) d = -int256(uint256(DELTA_MAX_X64));
+        if (Q64x64.abs(d) < uint256(DELTA_DUST_X64)) return 0;
+
+        uint256 realized = _unspecifiedAmount(params, delta);
+        uint256 amount = OffsetDelta.offsetAmount(realized, d);
+        if (amount == 0) return 0;
+
+        int128 hookDeltaUnspecified = hookTakes ? int128(int256(amount)) : -int128(int256(amount));
+        hookDeltaUnspecified = _capToReserve(hookDeltaUnspecified, unspecified);
+        if (hookDeltaUnspecified == 0) return 0;
+
+        _settleOrTake(unspecified, hookDeltaUnspecified);
+        return hookDeltaUnspecified;
     }
 
-    function _specifiedCurrency(PoolKey calldata key, SwapParams calldata params) private pure returns (Currency) {
-        return (params.zeroForOne == (params.amountSpecified < 0)) ? key.currency0 : key.currency1;
+    function _unspecifiedAmount(SwapParams calldata params, BalanceDelta delta) private pure returns (uint256) {
+        bool specifiedIsZero = params.zeroForOne == (params.amountSpecified < 0);
+        int128 unspecifiedDelta = specifiedIsZero ? delta.amount1() : delta.amount0();
+        return Q64x64.abs(int256(unspecifiedDelta));
+    }
+
+    function _unspecifiedCurrency(PoolKey calldata key, SwapParams calldata params) private pure returns (Currency) {
+        return (params.zeroForOne == (params.amountSpecified < 0)) ? key.currency1 : key.currency0;
+    }
+
+    function _capToReserve(int128 hookDeltaSpecified, Currency specified) private view returns (int128) {
+        if (hookDeltaSpecified >= 0) return hookDeltaSpecified;
+
+        uint256 owed = uint256(uint128(-hookDeltaSpecified));
+        uint256 available = reserveOf(specified);
+        if (owed <= available) return hookDeltaSpecified;
+
+        return -int128(uint128(available));
     }
 
     function _settleOrTake(Currency currency, int128 delta) private {
@@ -353,10 +425,6 @@ contract VaneHook is IHooks, IUnlockCallback {
         } else if (delta < 0) {
             currency.settle(POOL_MANAGER, address(this), uint256(-int256(delta)), true);
         }
-    }
-
-    function _abs(int256 x) private pure returns (int256) {
-        return x < 0 ? -x : x;
     }
 
     function beforeAddLiquidity(address, PoolKey calldata, ModifyLiquidityParams calldata, bytes calldata)

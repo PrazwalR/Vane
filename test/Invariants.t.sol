@@ -38,8 +38,8 @@ contract InvariantsTest is Test, Deployers {
         deployMintAndApprove2Currencies();
 
         uint160 flags = uint160(
-            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG
-                | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_FLAG
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
+                | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         address hookAddr = address(flags ^ (0x5555 << 144));
         deployCodeTo(
@@ -92,9 +92,21 @@ contract InvariantsTest is Test, Deployers {
         }
     }
 
+    function testFuzz_Invariant_OffsetNeverExceedsSwapAmountAtAnyScale(int256 rawDelta, uint256 rawNotional)
+        public
+        pure
+    {
+        int256 d = bound(rawDelta, -DELTA_MAX, DELTA_MAX);
+        uint256 offset = OffsetDelta.offsetAmount(rawNotional, d);
+        assertLe(offset, uint256(uint128(type(int128).max)), "offset must fit the int128 v4 delta at any notional");
+        if (rawNotional <= OffsetDelta.MAX_NOTIONAL && rawNotional > 0) {
+            assertLt(offset, rawNotional, "offset must stay below the swap amount");
+        }
+    }
+
     function testFuzz_Invariant_OffsetNeverExceedsSwapAmount(int256 rawDelta, uint128 rawNotional) public pure {
         int256 d = bound(rawDelta, -DELTA_MAX, DELTA_MAX);
-        uint256 notional = bound(uint256(rawNotional), 1, type(uint128).max / 2);
+        uint256 notional = bound(uint256(rawNotional), 1, type(uint128).max);
 
         uint256 offset = OffsetDelta.offsetAmount(notional, d);
 
