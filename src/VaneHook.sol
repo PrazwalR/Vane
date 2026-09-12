@@ -115,8 +115,8 @@ contract VaneHook is IHooks, IUnlockCallback {
     }
 
     function fundReserve(Currency currency, uint256 amount) external {
-        POOL_MANAGER.unlock(abi.encode(FUND, msg.sender, currency, amount));
         emit ReserveFunded(currency, amount, msg.sender);
+        POOL_MANAGER.unlock(abi.encode(FUND, msg.sender, currency, amount));
     }
 
     function unlockCallback(bytes calldata data) external override returns (bytes memory) {
@@ -139,8 +139,8 @@ contract VaneHook is IHooks, IUnlockCallback {
     function withdrawReserve(Currency currency, uint256 amount, address recipient) external {
         if (msg.sender != OWNER) revert Vane__NotOwner();
         if (recipient == address(0)) revert Vane__RecipientIsZero();
-        POOL_MANAGER.unlock(abi.encode(WITHDRAW, recipient, currency, amount));
         emit ReserveWithdrawn(currency, amount, recipient);
+        POOL_MANAGER.unlock(abi.encode(WITHDRAW, recipient, currency, amount));
     }
 
     function setReserveTarget(Currency currency, uint256 target) external {

@@ -15,6 +15,7 @@ import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
+import {VaneHook} from "../src/VaneHook.sol";
 import {VaneHookHarness} from "./utils/VaneHookHarness.sol";
 import {Fixtures} from "./utils/Fixtures.sol";
 
@@ -59,6 +60,27 @@ contract ReserveSolvencyTest is Test, Deployers {
         MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
         hook.fundReserve(currency0, RESERVE_TARGET);
         hook.fundReserve(currency1, RESERVE_TARGET);
+    }
+
+    function test_Reserve_OwnerCanWithdraw() public {
+        uint256 before = hook.reserveOf(currency0);
+        uint256 recipientBefore = currency0.balanceOfSelf();
+
+        hook.withdrawReserve(currency0, before, address(this));
+
+        assertEq(hook.reserveOf(currency0), 0, "reserve must be emptied");
+        assertEq(currency0.balanceOfSelf(), recipientBefore + before, "recipient receives the funds");
+    }
+
+    function test_Reserve_WithdrawIsOwnerOnly() public {
+        vm.prank(address(0xBAD));
+        vm.expectRevert(VaneHook.Vane__NotOwner.selector);
+        hook.withdrawReserve(currency0, 1, address(0xBAD));
+    }
+
+    function test_Reserve_WithdrawRejectsZeroRecipient() public {
+        vm.expectRevert(VaneHook.Vane__RecipientIsZero.selector);
+        hook.withdrawReserve(currency0, 1, address(0));
     }
 
     function _swap(bool zeroForOne, int256 amount) internal {
