@@ -19,7 +19,7 @@ import {FlowCovState} from "../../src/libraries/FlowAutocovariance.sol";
 contract VaneHookHarness is VaneHook {
     using PoolIdLibrary for PoolKey;
 
-    constructor(IPoolManager manager, VaneConfig memory config) VaneHook(manager, config) {}
+    constructor(IPoolManager manager, VaneConfig memory config, address owner) VaneHook(manager, config, owner) {}
 
     function setBelief(PoolKey calldata key, int256 newDeltaX64) external {
         PoolId id = key.toId();

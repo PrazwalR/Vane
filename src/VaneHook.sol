@@ -43,6 +43,7 @@ contract VaneHook is IHooks, IUnlockCallback {
     error Vane__NotPoolManager();
     error Vane__PoolNotAllowlisted();
     error Vane__NotOwner();
+    error Vane__OwnerIsZero();
 
     /// @notice Emitted once per block when the belief or the control state changes.
     event BeliefUpdated(PoolId indexed poolId, int256 deltaX64, uint256 kappaX64, uint256 varianceRatioX32);
@@ -105,11 +106,22 @@ contract VaneHook is IHooks, IUnlockCallback {
         _;
     }
 
-    constructor(IPoolManager manager, VaneConfig memory config) {
+    /// @param manager The v4 PoolManager.
+    /// @param config Validated at construction; see VaneConfigLib.
+    /// @param owner The account permitted to allowlist pools and set reserve targets.
+    /// @dev The owner is a parameter rather than msg.sender because a hook's address
+    ///      encodes its permissions, so deployment goes through a CREATE2 factory to
+    ///      reach a mined address. Taking msg.sender would make the FACTORY the owner,
+    ///      and the factory cannot call allowPool -- the hook would deploy cleanly,
+    ///      report the right flags, and then be permanently unable to accept a pool.
+    ///      Caught by deploying through the real factory in test rather than with a
+    ///      salted `new`, which would have hidden it.
+    constructor(IPoolManager manager, VaneConfig memory config, address owner) {
         VaneConfigLib.validate(config);
+        if (owner == address(0)) revert Vane__OwnerIsZero();
 
         POOL_MANAGER = manager;
-        OWNER = msg.sender;
+        OWNER = owner;
 
         THETA_X64 = config.thetaX64;
         VAR_LAMBDA_X32 = config.varLambdaX32;

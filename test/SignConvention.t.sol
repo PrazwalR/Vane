@@ -46,7 +46,9 @@ contract SignConventionTest is Test, Deployers {
                 | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_FLAG
         );
         address hookAddr = address(flags ^ (0x4444 << 144));
-        deployCodeTo("VaneHookHarness.sol:VaneHookHarness", abi.encode(manager, Fixtures.config()), hookAddr);
+        deployCodeTo(
+            "VaneHookHarness.sol:VaneHookHarness", abi.encode(manager, Fixtures.config(), address(this)), hookAddr
+        );
         hook = VaneHookHarness(hookAddr);
 
         vaneKey = PoolKey(currency0, currency1, 3000, 60, IHooks(hookAddr));
