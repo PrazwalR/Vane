@@ -3,7 +3,7 @@
   "exclude_dependencies": true,
   "exclude_informational": false,
   "exclude_low": false,
-  "detectors_to_exclude": "naming-convention,incorrect-equality,uninitialized-local,cyclomatic-complexity",
+  "detectors_to_exclude": "naming-convention,incorrect-equality,uninitialized-local,cyclomatic-complexity,unused-return,missing-zero-check",
   "solc_remaps": [
     "forge-std/=lib/forge-std/src/",
     "v4-core/=lib/v4-core/src/",

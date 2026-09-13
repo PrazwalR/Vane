@@ -32,6 +32,7 @@ contract IntegrationTest is Test, Deployers {
 
     VaneHookHarness internal hook;
     PoolKey internal vaneKey;
+    PoolKey internal plainKey;
     PoolId internal id;
 
     uint16 internal constant HORIZON_K = 20;
@@ -56,6 +57,10 @@ contract IntegrationTest is Test, Deployers {
         manager.initialize(vaneKey, SQRT_PRICE_1_1);
 
         modifyLiquidityRouter.modifyLiquidity(vaneKey, ModifyLiquidityParams(-60000, 60000, 5000 ether, 0), "");
+
+        plainKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(0)));
+        manager.initialize(plainKey, SQRT_PRICE_1_1);
+        modifyLiquidityRouter.modifyLiquidity(plainKey, ModifyLiquidityParams(-60000, 60000, 5000 ether, 0), "");
 
         MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
         MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
@@ -428,23 +433,26 @@ contract IntegrationTest is Test, Deployers {
         for (uint256 i = 0; i < 4; i++) {
             vm.roll(block.number + 1);
             _swap(i % 2 == 0, -1 ether);
+            _swapOn(plainKey, i % 2 == 0, -1 ether);
         }
         vm.roll(block.number + 1);
 
+        uint256 beforePlain = gasleft();
+        _swapOn(plainKey, true, -1 ether);
+        uint256 plainGas = beforePlain - gasleft();
+
         uint256 before = gasleft();
         _swap(true, -1 ether);
-        uint256 used = before - gasleft();
+        uint256 used = before - gasleft() - plainGas;
 
-        console2.log("full swap gas, new-block sampling path:", used);
+        console2.log("marginal hook cost, new-block sampling path:", used);
 
         if (GasGuard.assertionsEnabled()) {
-            assertLt(used, 56_131 + 45_000, "new-block path must fit the gas budget");
+            assertLt(used, 45_000, "new-block path must fit the gas budget");
         }
     }
 
     function test_Gas_WorstCaseCheckpointWithActiveBelief() public {
-        PoolKey memory plainKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(0)));
-        manager.initialize(plainKey, SQRT_PRICE_1_1);
         modifyLiquidityRouter.modifyLiquidity(plainKey, ModifyLiquidityParams(-60000, 60000, 5000 ether, 0), "");
 
         for (uint256 i = 0; i < HORIZON_K - 1; i++) {
@@ -502,16 +510,21 @@ contract IntegrationTest is Test, Deployers {
         for (uint256 i = 0; i < HORIZON_K; i++) {
             vm.roll(block.number + 1);
             _swap(i % 2 == 0, -0.5 ether);
+            _swapOn(plainKey, i % 2 == 0, -0.5 ether);
         }
 
         vm.roll(block.number + 1);
+        uint256 beforePlain = gasleft();
+        _swapOn(plainKey, true, -1 ether);
+        uint256 plainGas = beforePlain - gasleft();
+
         uint256 before = gasleft();
         _swap(true, -1 ether);
-        uint256 used = before - gasleft();
+        uint256 used = before - gasleft() - plainGas;
 
-        console2.log("full swap gas, horizon checkpoint path:", used);
+        console2.log("marginal hook cost, horizon checkpoint path:", used);
         if (GasGuard.assertionsEnabled()) {
-            assertLt(used, 56_131 + 45_000, "checkpoint path must fit the gas budget");
+            assertLt(used, 45_000, "checkpoint path must fit the gas budget");
         }
     }
 }
