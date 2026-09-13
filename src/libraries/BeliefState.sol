@@ -14,14 +14,14 @@ library BeliefState {
         pure
         returns (int256)
     {
-        int256 next = deltaX64 + (kappaX64 * signedFlow) / ONE_X64;
+        int256 next = deltaX64 + kappaX64 * signedFlow;
         if (next > deltaMaxX64) return deltaMaxX64;
         if (next < -deltaMaxX64) return -deltaMaxX64;
         return next;
     }
 
     function pendingIncrement(int256 kappaX64, int256 pendingFlow) internal pure returns (int256) {
-        return (kappaX64 * pendingFlow) / ONE_X64;
+        return kappaX64 * pendingFlow;
     }
 
     function dampPending(int256 deltaX64, int256 increment) internal pure returns (int256) {
