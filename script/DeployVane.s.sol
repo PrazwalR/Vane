@@ -54,6 +54,6 @@ contract DeployVane is Script {
         }
 
         console2.log("deployed      :", address(hook));
-        console2.log("owner         :", hook.OWNER());
+        console2.log("owner         :", hook.owner());
     }
 }

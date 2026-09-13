@@ -7,7 +7,7 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
-import {Currency} from "v4-core/types/Currency.sol";
+import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
@@ -35,10 +35,18 @@ contract VaneHook is IHooks, IUnlockCallback {
     error Vane__NotOwner();
     error Vane__OwnerIsZero();
     error Vane__RecipientIsZero();
+    error Vane__NativeValueMismatch();
+    error Vane__UnexpectedNativeValue();
 
     event BeliefUpdated(PoolId indexed poolId, int256 deltaX64, uint256 kappaX64, uint256 varianceRatioX32);
 
     event EstimatorDivergence(PoolId indexed poolId, uint256 noiseA, uint256 noiseB, uint256 divergenceX32);
+
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    event PoolAllowed(PoolId indexed poolId, uint64 flowUnit);
+    event PoolDisallowed(PoolId indexed poolId);
 
     event ReserveFunded(Currency indexed currency, uint256 amount, address indexed from);
     event ReserveWithdrawn(Currency indexed currency, uint256 amount, address indexed to);
@@ -51,7 +59,9 @@ contract VaneHook is IHooks, IUnlockCallback {
     uint8 private constant WITHDRAW = 1;
 
     IPoolManager public immutable POOL_MANAGER;
-    address public immutable OWNER;
+
+    address public owner;
+    address public pendingOwner;
 
     uint64 private immutable THETA_X64;
     uint64 private immutable VAR_LAMBDA_X32;
@@ -75,6 +85,7 @@ contract VaneHook is IHooks, IUnlockCallback {
 
     mapping(PoolId => FlowCovState) internal _flowCov;
     mapping(PoolId => uint128) internal _checkpointLiquidity;
+    mapping(PoolId => uint64) internal _flowUnitOf;
 
     mapping(PoolId => bool) public allowlisted;
 
@@ -85,12 +96,18 @@ contract VaneHook is IHooks, IUnlockCallback {
         _;
     }
 
-    constructor(IPoolManager manager, VaneConfig memory vaneConfig, address owner) {
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert Vane__NotOwner();
+        _;
+    }
+
+    constructor(IPoolManager manager, VaneConfig memory vaneConfig, address owner_) {
         VaneConfigLib.validate(vaneConfig);
-        if (owner == address(0)) revert Vane__OwnerIsZero();
+        if (owner_ == address(0)) revert Vane__OwnerIsZero();
 
         POOL_MANAGER = manager;
-        OWNER = owner;
+        owner = owner_;
+        emit OwnershipTransferred(address(0), owner_);
 
         THETA_X64 = vaneConfig.thetaX64;
         VAR_LAMBDA_X32 = vaneConfig.varLambdaX32;
@@ -109,12 +126,50 @@ contract VaneHook is IHooks, IUnlockCallback {
         ROUTE_B_Z_SCORE = vaneConfig.routeBZScore;
     }
 
-    function allowPool(PoolKey calldata key) external {
-        if (msg.sender != OWNER) revert Vane__NotOwner();
-        allowlisted[key.toId()] = true;
+    function transferOwnership(address newOwner) external onlyOwner {
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
     }
 
-    function fundReserve(Currency currency, uint256 amount) external {
+    function acceptOwnership() external {
+        if (msg.sender == address(0) || msg.sender != pendingOwner) revert Vane__NotOwner();
+        emit OwnershipTransferred(owner, msg.sender);
+        owner = msg.sender;
+        pendingOwner = address(0);
+    }
+
+    function allowPool(PoolKey calldata key) external onlyOwner {
+        PoolId id = key.toId();
+        allowlisted[id] = true;
+        emit PoolAllowed(id, flowUnitOf(id));
+    }
+
+    function allowPool(PoolKey calldata key, uint64 poolFlowUnit) external onlyOwner {
+        VaneConfigLib.validateFlowUnit(poolFlowUnit);
+        PoolId id = key.toId();
+        allowlisted[id] = true;
+        _flowUnitOf[id] = poolFlowUnit;
+        emit PoolAllowed(id, poolFlowUnit);
+    }
+
+    function disallowPool(PoolKey calldata key) external onlyOwner {
+        PoolId id = key.toId();
+        allowlisted[id] = false;
+        emit PoolDisallowed(id);
+    }
+
+    function flowUnitOf(PoolId id) public view returns (uint64) {
+        uint64 unit = _flowUnitOf[id];
+        return unit == 0 ? FLOW_UNIT : unit;
+    }
+
+    function fundReserve(Currency currency, uint256 amount) external payable {
+        if (CurrencyLibrary.isAddressZero(currency)) {
+            if (msg.value != amount) revert Vane__NativeValueMismatch();
+        } else if (msg.value != 0) {
+            revert Vane__UnexpectedNativeValue();
+        }
+
         emit ReserveFunded(currency, amount, msg.sender);
         POOL_MANAGER.unlock(abi.encode(FUND, msg.sender, currency, amount));
     }
@@ -136,15 +191,13 @@ contract VaneHook is IHooks, IUnlockCallback {
         return "";
     }
 
-    function withdrawReserve(Currency currency, uint256 amount, address recipient) external {
-        if (msg.sender != OWNER) revert Vane__NotOwner();
+    function withdrawReserve(Currency currency, uint256 amount, address recipient) external onlyOwner {
         if (recipient == address(0)) revert Vane__RecipientIsZero();
         emit ReserveWithdrawn(currency, amount, recipient);
         POOL_MANAGER.unlock(abi.encode(WITHDRAW, recipient, currency, amount));
     }
 
-    function setReserveTarget(Currency currency, uint256 target) external {
-        if (msg.sender != OWNER) revert Vane__NotOwner();
+    function setReserveTarget(Currency currency, uint256 target) external onlyOwner {
         reserveTargetOf[currency] = target;
     }
 
@@ -244,54 +297,65 @@ contract VaneHook is IHooks, IUnlockCallback {
         onlyPoolManager
         returns (bytes4, int128)
     {
+        return (IHooks.afterSwap.selector, _recordSwap(key, params, delta));
+    }
+
+    function _recordSwap(PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
+        private
+        returns (int128 hookDeltaUnspecified)
+    {
         PoolId id = key.toId();
         PoolState memory s = PoolStateLib.unpackState(_state[id]);
         PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id]);
 
-        int128 hookDeltaUnspecified = _applyOffset(id, key, params, delta, s.deltaX64);
+        {
+            int256 magnitude1 = int256(Q64x64.abs(int256(delta.amount1())));
+            int256 signedNotional = params.zeroForOne ? -magnitude1 : magnitude1;
+            a.flowAccum = FlowVariance.accumulate(a.flowAccum, FlowVariance.toFlowUnits(signedNotional, flowUnitOf(id)));
+        }
 
-        int256 magnitude1 = int256(Q64x64.abs(int256(delta.amount1())));
-        int256 signedNotional = params.zeroForOne ? -magnitude1 : magnitude1;
-        a.flowAccum = FlowVariance.accumulate(a.flowAccum, FlowVariance.toFlowUnits(signedNotional, FLOW_UNIT));
+        hookDeltaUnspecified = _applyOffset(id, key, params, delta, s, a);
 
         if (uint32(block.number) != s.lastBlock) {
-            (uint160 sqrtPriceX96, int24 tickNow,,) = POOL_MANAGER.getSlot0(id);
-
-            s.varOneX32 = HorizonVariance.updateVarOne(s.varOneX32, tickNow, s.lastTick, MAX_TICK_DELTA, VAR_LAMBDA_X32);
-            s.flowVarX32 = FlowVariance.updateFlowVar(s.flowVarX32, a.flowAccum, FLOW_LAMBDA_X32);
-
-            int64 blockFlow = a.flowAccum;
-            a.flowAccum = 0;
-
-            _flowCov[id] = FlowAutocovariance.update(_flowCov[id], blockFlow, FLOW_LAMBDA_X32);
-
-            s.deltaX64 = int64(BeliefState.decay(s.deltaX64, THETA_X64));
-            s.lastTick = tickNow;
-            s.lastBlock = uint32(block.number);
-
-            uint256 vrX32;
-            if (uint32(block.number) - a.checkpointBlock >= HORIZON_K) {
-                (s, a, vrX32) = _stepHorizon(id, s, a, tickNow, sqrtPriceX96);
-            }
-
-            s.deltaX64 = int64(
-                BeliefState.update(
-                    s.deltaX64, int256(uint256(a.kappaX64)), int256(blockFlow), int256(uint256(DELTA_MAX_X64))
-                )
-            );
-
-            emit BeliefUpdated(id, s.deltaX64, a.kappaX64, vrX32);
+            _advanceBlock(id, s, a);
         }
 
         _state[id] = PoolStateLib.packState(s);
         _aux[id] = PoolStateLib.packAux(a);
+    }
 
-        return (IHooks.afterSwap.selector, hookDeltaUnspecified);
+    function _advanceBlock(PoolId id, PoolState memory s, PoolStateAux memory a) private {
+        (uint160 sqrtPriceX96, int24 tickNow,,) = POOL_MANAGER.getSlot0(id);
+
+        s.varOneX32 = HorizonVariance.updateVarOne(s.varOneX32, tickNow, s.lastTick, MAX_TICK_DELTA, VAR_LAMBDA_X32);
+        s.flowVarX32 = FlowVariance.updateFlowVar(s.flowVarX32, a.flowAccum, FLOW_LAMBDA_X32);
+
+        int64 blockFlow = a.flowAccum;
+        a.flowAccum = 0;
+
+        _flowCov[id] = FlowAutocovariance.update(_flowCov[id], blockFlow, FLOW_LAMBDA_X32);
+
+        s.deltaX64 = int64(BeliefState.decay(s.deltaX64, THETA_X64));
+        s.lastTick = tickNow;
+        s.lastBlock = uint32(block.number);
+
+        uint256 vrX32;
+        if (uint32(block.number) - a.checkpointBlock >= HORIZON_K) {
+            vrX32 = _stepHorizon(id, s, a, tickNow, sqrtPriceX96);
+        }
+
+        s.deltaX64 = int64(
+            BeliefState.update(
+                s.deltaX64, int256(uint256(a.kappaX64)), int256(blockFlow), int256(uint256(DELTA_MAX_X64))
+            )
+        );
+
+        emit BeliefUpdated(id, s.deltaX64, a.kappaX64, vrX32);
     }
 
     function _stepHorizon(PoolId id, PoolState memory s, PoolStateAux memory a, int24 tickNow, uint160 sqrtPriceX96)
         private
-        returns (PoolState memory, PoolStateAux memory, uint256 vrX32)
+        returns (uint256 vrX32)
     {
         uint256 elapsed = uint256(uint32(block.number) - a.checkpointBlock);
         uint16 horizon = elapsed > type(uint16).max ? type(uint16).max : uint16(elapsed);
@@ -304,14 +368,14 @@ contract VaneHook is IHooks, IUnlockCallback {
         uint256 sigmaX64 = HorizonVariance.sigmaX64(a.varKX32, horizon);
         uint256 noiseX64 = FlowVariance.noiseScaleX64(s.flowVarX32);
 
-        uint256 depth = DepthLib.depthX64(_manipulationResistantLiquidity(id), sqrtPriceX96, FLOW_UNIT);
+        uint256 depth = DepthLib.depthX64(_manipulationResistantLiquidity(id), sqrtPriceX96, flowUnitOf(id));
 
         uint256 openLoop = KappaLib.kappaX64(depth, sigmaX64, noiseX64, KAPPA_MAX_X64);
         openLoop = _applyDivergenceCheck(id, s.flowVarX32, openLoop);
 
         if (s.varOneX32 == 0) {
             a.kappaX64 = uint64(openLoop);
-            return (s, a, 0);
+            return 0;
         }
 
         vrX32 = HorizonVariance.varianceRatioX32(a.varKX32, s.varOneX32, horizon);
@@ -330,8 +394,6 @@ contract VaneHook is IHooks, IUnlockCallback {
                 })
             )
         );
-
-        return (s, a, vrX32);
     }
 
     function _manipulationResistantLiquidity(PoolId id) private returns (uint128) {
@@ -339,7 +401,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         uint128 liquidityPrev = _checkpointLiquidity[id];
         _checkpointLiquidity[id] = liquidityNow;
 
-        if (liquidityPrev == 0) return liquidityNow;
+        if (liquidityPrev == 0) return 0;
         return liquidityPrev < liquidityNow ? liquidityPrev : liquidityNow;
     }
 
@@ -373,30 +435,45 @@ contract VaneHook is IHooks, IUnlockCallback {
         PoolKey calldata key,
         SwapParams calldata params,
         BalanceDelta delta,
-        int256 storedDelta
+        PoolState memory s,
+        PoolStateAux memory a
     ) private returns (int128) {
-        int256 d = storedDelta;
-        if (d == 0) return 0;
+        int256 d = s.deltaX64;
+        if (d == 0 || !allowlisted[id]) return 0;
 
         Currency unspecified = _unspecifiedCurrency(key, params);
-
         bool hookTakes = params.zeroForOne ? (d < 0) : (d > 0);
-        if (!hookTakes) d = _scaleForReserve(id, d, unspecified);
 
-        if (d > int256(uint256(DELTA_MAX_X64))) d = int256(uint256(DELTA_MAX_X64));
-        if (d < -int256(uint256(DELTA_MAX_X64))) d = -int256(uint256(DELTA_MAX_X64));
-        if (Q64x64.abs(d) < uint256(DELTA_DUST_X64)) return 0;
+        if (!hookTakes) {
+            d = BeliefState.dampPending(
+                d, BeliefState.pendingIncrement(int256(uint256(a.kappaX64)), int256(a.flowAccum))
+            );
+            if (d == 0) return 0;
+            d = _scaleForReserve(id, d, unspecified);
+        }
 
-        uint256 realized = _unspecifiedAmount(params, delta);
-        uint256 amount = OffsetDelta.offsetAmount(realized, d);
+        d = _clampBelief(d);
+        if (d == 0) return 0;
+
+        int128 hookDelta = _capToReserve(
+            _signedOffset(hookTakes, OffsetDelta.offsetAmount(_unspecifiedAmount(params, delta), d)), unspecified
+        );
+        if (hookDelta == 0) return 0;
+
+        _settleOrTake(unspecified, hookDelta);
+        return hookDelta;
+    }
+
+    function _clampBelief(int256 d) private view returns (int256) {
+        int256 cap = int256(uint256(DELTA_MAX_X64));
+        if (d > cap) d = cap;
+        if (d < -cap) d = -cap;
+        return Q64x64.abs(d) < uint256(DELTA_DUST_X64) ? int256(0) : d;
+    }
+
+    function _signedOffset(bool hookTakes, uint256 amount) private pure returns (int128) {
         if (amount == 0) return 0;
-
-        int128 hookDeltaUnspecified = hookTakes ? int128(int256(amount)) : -int128(int256(amount));
-        hookDeltaUnspecified = _capToReserve(hookDeltaUnspecified, unspecified);
-        if (hookDeltaUnspecified == 0) return 0;
-
-        _settleOrTake(unspecified, hookDeltaUnspecified);
-        return hookDeltaUnspecified;
+        return hookTakes ? int128(int256(amount)) : -int128(int256(amount));
     }
 
     function _unspecifiedAmount(SwapParams calldata params, BalanceDelta delta) private pure returns (uint256) {

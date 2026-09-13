@@ -20,6 +20,24 @@ library BeliefState {
         return next;
     }
 
+    function pendingIncrement(int256 kappaX64, int256 pendingFlow) internal pure returns (int256) {
+        return (kappaX64 * pendingFlow) / ONE_X64;
+    }
+
+    function dampPending(int256 deltaX64, int256 increment) internal pure returns (int256) {
+        if (deltaX64 == 0) return 0;
+
+        int256 adjusted = deltaX64 + increment;
+
+        if (deltaX64 > 0) {
+            if (adjusted > deltaX64) return deltaX64;
+            return adjusted < 0 ? int256(0) : adjusted;
+        }
+
+        if (adjusted < deltaX64) return deltaX64;
+        return adjusted > 0 ? int256(0) : adjusted;
+    }
+
     function scaleForReserve(int256 deltaX64, uint256 reserve, uint256 reserveTarget) internal pure returns (int256) {
         if (reserveTarget == 0 || reserve >= reserveTarget) return deltaX64;
         return (deltaX64 * int256(reserve)) / int256(reserveTarget);

@@ -95,15 +95,19 @@ library VaneConfigLib {
             revert Vane__MaxTickDeltaOutOfRange();
         }
 
-        if (c.flowUnit < MIN_FLOW_UNIT || c.flowUnit > MAX_FLOW_UNIT) {
-            revert Vane__FlowUnitOutOfRange();
-        }
+        validateFlowUnit(c.flowUnit);
 
         if (c.reserveTargetDefault == 0) revert Vane__ReserveTargetZero();
 
         if (c.maxEstimatorDivergenceX32 == 0) revert Vane__MaxDivergenceZero();
 
         if (c.routeBZScore < 2) revert Vane__RouteBZScoreTooLow();
+    }
+
+    function validateFlowUnit(uint64 flowUnit) internal pure {
+        if (flowUnit < MIN_FLOW_UNIT || flowUnit > MAX_FLOW_UNIT) {
+            revert Vane__FlowUnitOutOfRange();
+        }
     }
 
     function loopGainX32(VaneConfig memory c) internal pure returns (uint256) {
