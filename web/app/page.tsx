@@ -1,4 +1,8 @@
+import LiveState from "@/components/LiveState";
+
 const REPO = "https://github.com/PrazwalR/Vane";
+
+export const revalidate = 30;
 
 export default function Home() {
   return (
@@ -181,6 +185,8 @@ export default function Home() {
           </p>
         </div>
       </section>
+
+      <LiveState />
 
       <section>
         <h2>What the audit found</h2>

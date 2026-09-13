@@ -1,0 +1,13 @@
+{
+  "11155111": {
+    "network": "sepolia",
+    "poolManager": "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",
+    "vaneHook": "0xA0480516F7D6ee73f0eF147808259F952780b044",
+    "token0": "0x13bcc0C980C1b1056cAD075310e10D2601B9B129",
+    "token1": "0x308d0a4d5421468941Fc7d58AdB5c9Ef8C695A38",
+    "poolId": "0x8923ada723ec7e7716911a02c95bbd3004495c8b5e547fe6e373091080d3ce5b",
+    "hookFlags": 12356,
+    "fee": 3000,
+    "tickSpacing": 60
+  }
+}
