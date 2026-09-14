@@ -11,8 +11,15 @@ const source = join(here, "..", "..", "deployments.json");
 const targetDir = join(here, "..", "generated");
 const target = join(targetDir, "deployments.json");
 
+// The generated copy is committed, so a build that cannot see the repository root --
+// a CLI deploy from this directory, for instance, which uploads only this directory --
+// still has the data it needs. Refreshing is best-effort; missing source is not fatal.
 if (!existsSync(source)) {
-  console.error(`sync-deployments: ${source} not found`);
+  if (existsSync(target)) {
+    console.log("sync-deployments: repo root not visible, using the committed copy");
+    process.exit(0);
+  }
+  console.error(`sync-deployments: ${source} not found and no committed copy exists`);
   process.exit(1);
 }
 
