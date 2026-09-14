@@ -16,3 +16,10 @@ line_length = 120
 tab_width = 4
 bracket_spacing = false
 int_types = "long"
+
+[invariant]
+runs = 128
+depth = 64
+fail_on_revert = false
+call_override = false
+shrink_run_limit = 2000
