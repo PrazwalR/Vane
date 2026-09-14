@@ -54,8 +54,13 @@ library Q64x64 {
 
         z = 1 << ((bits >> 1) + 1);
 
+        // Newton's method converges quadratically from a seed within a factor of two,
+        // so eight iterations is beyond sufficient for any 256-bit input. The bound is a
+        // proof obligation rather than a real limit: an unbounded loop on the swap path
+        // is a denial-of-service surface even when it always terminates, and a reviewer
+        // should not have to reason about convergence to rule that out.
         uint256 y = (z + x / z) >> 1;
-        while (y < z) {
+        for (uint256 i = 0; i < 8 && y < z; i++) {
             z = y;
             y = (x / y + y) >> 1;
         }

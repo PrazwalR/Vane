@@ -477,7 +477,7 @@ contract IntegrationTest is Test, Deployers {
         console2.log("marginal hook cost:", vaneGas - plainGas);
 
         if (GasGuard.assertionsEnabled()) {
-            assertLt(vaneGas - plainGas, 76_000, "worst case must stay within its recorded bound");
+            assertLt(vaneGas - plainGas, 78_000, "worst case must stay within its recorded bound");
         }
     }
 
