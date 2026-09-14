@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,300;6..72,400&family=Instrument+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --ground:#FAF8F3; --panel:#FFFDF8; --sunk:#F3F0E8;
+  --ink:#16150F; --ink2:#5C574B; --ink3:#8A8475;
+  --rule:#E4DED1; --rule2:#D3CBBA;
+  --accent:#B0530C; --accent-soft:rgba(176,83,12,0.07);
+  --ok:#44603F; --warn:#7F5C13; --crit:#8B3726;
+  --lift:0 1px 0 rgba(22,21,15,0.03), 0 8px 20px -12px rgba(22,21,15,0.28);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#131210; --panel:#1A1916; --sunk:#100F0D;
+    --ink:#EEE9DE; --ink2:#A9A297; --ink3:#7B7468;
+    --rule:#2A2924; --rule2:#3A3831;
+    --accent:#D9873E; --accent-soft:rgba(217,135,62,0.10);
+    --ok:#93B38C; --warn:#C89F4C; --crit:#CC7460;
+    --lift:0 1px 0 rgba(0,0,0,0.4), 0 10px 24px -14px rgba(0,0,0,0.8);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#131210; --panel:#1A1916; --sunk:#100F0D;
+  --ink:#EEE9DE; --ink2:#A9A297; --ink3:#7B7468;
+  --rule:#2A2924; --rule2:#3A3831;
+  --accent:#D9873E; --accent-soft:rgba(217,135,62,0.10);
+  --ok:#93B38C; --warn:#C89F4C; --crit:#CC7460;
+  --lift:0 1px 0 rgba(0,0,0,0.4), 0 10px 24px -14px rgba(0,0,0,0.8);
+}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:"Instrument Sans",system-ui,sans-serif;overflow-x:hidden;font-variant-numeric:tabular-nums}
+a{color:var(--accent);text-decoration:none;border-bottom:1px solid var(--rule2)}
+a:hover{color:var(--ink);border-bottom-color:var(--accent)}
+*{box-sizing:border-box}
+</style>
+</helmet>
+
+<div style="background:var(--ground);min-height:100vh">
+
+<div style="position:sticky;top:0;z-index:20;background:var(--ground);border-bottom:1px solid var(--rule)">
+  <div style="max-width:1080px;margin:0 auto;padding:0 28px;height:56px;display:flex;align-items:center;justify-content:space-between;gap:20px">
+    <button type="button" onClick="{{ goSite }}" style="appearance:none;background:none;border:0;padding:0;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:500;letter-spacing:0.22em;color:var(--accent)">VANE</button>
+    <div style="display:flex;align-items:center;gap:22px;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase">
+      <a href="#problem" style="color:var(--ink2);border:0">Research</a>
+      <button type="button" onClick="{{ goLive }}" style="appearance:none;background:none;border:0;padding:0;cursor:pointer;font-family:inherit;font-size:inherit;letter-spacing:inherit;text-transform:inherit;color:var(--ink2)">Live state</button>
+      <a href="#mechanism" style="color:var(--ink2);border:0">Mechanism</a>
+      <a href="#audit" style="color:var(--ink2);border:0">Audit</a>
+      <a href="https://github.com" target="_blank" rel="noreferrer" style="color:var(--ink2);border:0">GitHub</a>
+    </div>
+  </div>
+</div>
+
+<sc-if value="{{ isSite }}" hint-placeholder-val="{{ true }}">
+<div>
+
+  <div style="max-width:1080px;margin:0 auto;padding:0 28px">
+    <div style="display:grid;grid-template-columns:minmax(0,1.45fr) minmax(0,1fr);gap:48px;align-items:start;padding:88px 0 76px">
+      <div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">Uniswap v4 hook / research code</div>
+        <h1 style="font-family:'IBM Plex Mono',monospace;font-weight:500;font-size:clamp(56px,9vw,104px);line-height:0.94;letter-spacing:0.04em;margin:26px 0 0;color:var(--ink)">VANE</h1>
+        <p style="font-family:Newsreader,serif;font-size:clamp(22px,2.6vw,30px);line-height:1.3;font-weight:300;color:var(--ink);margin:22px 0 0;max-width:26ch">A Uniswap v4 hook that gives a pool a posterior.</p>
+        <div style="margin:34px 0 0;padding-left:18px;border-left:2px solid var(--accent)">
+          <p style="font-family:Newsreader,serif;font-size:18px;line-height:1.5;color:var(--ink2);margin:0;max-width:46ch">A weather vane cannot see the wind. It reveals the wind by turning.</p>
+        </div>
+        <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:66ch;margin:30px 0 0;text-wrap:pretty">A pool cannot see information. VANE makes it reveal information by turning: it infers the informed signal from the deflection of its own order flow and corrects its quote accordingly. No oracle, no auction, no operator.</p>
+        <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:66ch;margin:14px 0 0;text-wrap:pretty">The curve keeps settlement. A small signed offset — the belief — does discovery. When the belief is positive a buyer pays slightly more and a seller receives slightly more. A fee is unsigned and takes from both. This is a quote, not a toll.</p>
+      </div>
+      <sc-if value="{{ showVaneObject }}" hint-placeholder-val="{{ true }}">
+      <div style="border:1px solid var(--rule);background:var(--panel);box-shadow:var(--lift);border-radius:8px;padding:18px;align-self:stretch">
+        <div style="display:flex;justify-content:space-between;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">
+          <span>Fig. 1 — vane</span>
+          <span>axis / arm / pointer</span>
+        </div>
+        <svg viewBox="0 0 320 260" width="100%" height="auto" style="display:block;margin-top:8px" aria-label="Abstract weather vane over a technical grid">
+          <g stroke="var(--rule)" stroke-width="1">
+            <line x1="20" y1="196" x2="300" y2="196"></line>
+            <line x1="40" y1="216" x2="280" y2="216"></line>
+            <line x1="60" y1="236" x2="260" y2="236"></line>
+            <line x1="20" y1="196" x2="60" y2="236"></line>
+            <line x1="300" y1="196" x2="260" y2="236"></line>
+            <line x1="160" y1="196" x2="160" y2="236"></line>
+            <line x1="90" y1="196" x2="110" y2="236"></line>
+            <line x1="230" y1="196" x2="210" y2="236"></line>
+          </g>
+          <line x1="160" y1="44" x2="160" y2="196" stroke="var(--ink)" stroke-width="1.5"></line>
+          <line x1="160" y1="108" x2="262" y2="92" stroke="var(--ink)" stroke-width="1.5"></line>
+          <line x1="160" y1="108" x2="86" y2="120" stroke="var(--ink)" stroke-width="1"></line>
+          <rect x="86" y="120" width="34" height="26" fill="none" stroke="var(--ink2)" stroke-width="1"></rect>
+          <polygon points="262,84 286,92 262,100" fill="var(--accent)"></polygon>
+          <circle cx="160" cy="108" r="3.5" fill="var(--ground)" stroke="var(--ink)" stroke-width="1.5"></circle>
+          <line x1="160" y1="44" x2="160" y2="30" stroke="var(--accent)" stroke-width="1.5"></line>
+        </svg>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;line-height:1.6;letter-spacing:0.06em;color:var(--ink3);border-top:1px solid var(--rule);padding-top:10px;margin-top:6px">The pointer holds the sign of the belief. It is static until the contract reports a signed offset.</div>
+      </div>
+      </sc-if>
+    </div>
+  </div>
+
+  <div id="problem" style="border-top:1px solid var(--rule)">
+    <div style="max-width:1080px;margin:0 auto;padding:70px 28px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">01 / The problem</div>
+      <h2 style="font-family:Newsreader,serif;font-weight:400;font-size:clamp(28px,3.4vw,38px);line-height:1.15;letter-spacing:-0.01em;margin:14px 0 22px;color:var(--ink);max-width:24ch">The pool under-reacts, and gets worse as it deepens</h2>
+      <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:68ch;margin:0 0 14px;text-wrap:pretty">A Glosten-Milgrom market maker, after an informative buy, moves its quote past where the fill landed, because the buy was evidence. An AMM moves exactly the fill distance along the curve and stops. The gap between the mechanical move and the correct move is free money, and the next arbitrageur collects it.</p>
+      <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:68ch;margin:0 0 14px;text-wrap:pretty">The pool's log-price impact per unit of notional is set by its depth. The informationally efficient impact is set by the market: the ratio of noise volume to fundamental volatility. Setting one equal to the other gives the depth a pool would need in order to price information correctly.</p>
+      <div style="margin:32px 0 0;display:grid;gap:0;border:1px solid var(--rule);border-left:2px solid var(--accent);border-radius:0 8px 8px 0;background:var(--panel);box-shadow:var(--lift);max-width:760px">
+        <div style="padding:14px 22px 0;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">2.3 — optimal depth</div>
+        <div style="padding:12px 22px 14px;overflow-x:auto"><div style="font-family:'IBM Plex Mono',monospace;font-size:clamp(22px,3.2vw,32px);color:var(--ink);white-space:nowrap">D* = 4U / &#963;</div></div>
+        <div style="padding:12px 22px 18px;border-top:1px solid var(--rule);font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);max-width:60ch">U is per-block noise notional, &#963; the per-block fundamental log-volatility. Depth is fixed by how much capital was deposited; these coincide only by accident.</div>
+      </div>
+      <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:68ch;margin:30px 0 0;text-wrap:pretty">For deep major pairs the pool is far deeper than D*, so it under-reacts. Loss-versus-rebalancing scales with the same marginal liquidity. LPs are rewarded for depositing capital, depth rises, the pool under-reacts more, informed traders accumulate more cheaply, and LVR rises. The AMM's capital-formation incentive is directly opposed to its price-discovery quality.</p>
+    </div>
+  </div>
+
+  <div id="mechanism" style="border-top:1px solid var(--rule);background:var(--sunk)">
+    <div style="max-width:1080px;margin:0 auto;padding:70px 28px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">02 / The mechanism</div>
+      <h2 style="font-family:Newsreader,serif;font-weight:400;font-size:clamp(28px,3.4vw,38px);line-height:1.15;letter-spacing:-0.01em;margin:14px 0 26px;color:var(--ink);max-width:26ch">Settlement stays on the curve. Discovery moves to a belief.</h2>
+      <div style="display:grid;gap:14px;max-width:760px">
+        <div style="border:1px solid var(--rule);border-left:2px solid var(--accent);border-radius:0 8px 8px 0;background:var(--panel);box-shadow:var(--lift)">
+          <div style="padding:14px 22px 0;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Effective quote</div>
+          <div style="padding:10px 22px 16px;overflow-x:auto"><div style="font-family:'IBM Plex Mono',monospace;font-size:clamp(19px,2.6vw,26px);color:var(--ink);white-space:nowrap">P_effective = P_curve &#183; e^&#948;</div></div>
+        </div>
+        <div style="border:1px solid var(--rule);border-left:2px solid var(--accent);border-radius:0 8px 8px 0;background:var(--panel);box-shadow:var(--lift)">
+          <div style="padding:14px 22px 0;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Belief dynamics — 2.6</div>
+          <div style="padding:10px 22px 16px;overflow-x:auto"><div style="font-family:'IBM Plex Mono',monospace;font-size:clamp(19px,2.6vw,26px);color:var(--ink);white-space:nowrap">d&#948; = &#954; &#183; dq &#8722; &#952; &#183; &#948; &#183; dt</div></div>
+          <div style="padding:12px 22px 16px;border-top:1px solid var(--rule);font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);max-width:60ch">Signed flow pushes the belief; &#952; decays it as the information becomes public elsewhere.</div>
+        </div>
+        <div style="border:1px solid var(--rule);border-left:2px solid var(--accent);border-radius:0 8px 8px 0;background:var(--panel);box-shadow:var(--lift)">
+          <div style="padding:14px 22px 0;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Correction gain — 2.5</div>
+          <div style="padding:10px 22px 16px;overflow-x:auto"><div style="font-family:'IBM Plex Mono',monospace;font-size:clamp(19px,2.6vw,26px);color:var(--ink);white-space:nowrap">&#954; = &#963;/(2U) &#8722; 2/D</div></div>
+          <div style="padding:12px 22px 16px;border-top:1px solid var(--rule);font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);max-width:60ch">&#8706;&#954;/&#8706;D &gt; 0. The correction grows with depth, so the remedy scales with the disease.</div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule);border-radius:8px;overflow:hidden;margin-top:40px">
+        <div style="background:var(--panel);padding:22px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--accent)">Oracle-free</div>
+          <p style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);margin:10px 0 0">Every other LVR mitigation needs an exogenous price. The correction here is derived from order flow, which is what Kyle's model is for.</p>
+        </div>
+        <div style="background:var(--panel);padding:22px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--accent)">Signed, not a fee</div>
+          <p style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);margin:10px 0 0">With a positive belief the buyer pays more and the seller receives more. Both sides trade at a shifted price. A fee cannot do this.</p>
+        </div>
+        <div style="background:var(--panel);padding:22px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--accent)">Self-limiting</div>
+          <p style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);margin:10px 0 0">Flow against the belief is paid out, but that same flow drives the belief toward zero, so the exposure extinguishes itself.</p>
+        </div>
+      </div>
+
+      <div style="margin-top:44px;border:1px solid var(--rule);border-radius:8px;background:var(--panel);box-shadow:var(--lift);padding:24px 22px">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Fig. 2 — the curve settles, the belief shifts the quote</div>
+        <svg viewBox="0 0 900 230" width="100%" height="auto" style="display:block;margin-top:16px" aria-label="Two offset price curves showing the belief displacement">
+          <g stroke="var(--rule)" stroke-width="1">
+            <line x1="60" y1="200" x2="860" y2="200"></line>
+            <line x1="60" y1="40" x2="60" y2="200"></line>
+          </g>
+          <path d="M60 180 C 260 176, 520 150, 860 78" fill="none" stroke="var(--ink)" stroke-width="1.5"></path>
+          <path d="M60 156 C 260 152, 520 126, 860 54" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="1 0"></path>
+          <g stroke="var(--ink3)" stroke-width="1">
+            <line x1="470" y1="141" x2="470" y2="165"></line>
+            <line x1="464" y1="141" x2="476" y2="141"></line>
+            <line x1="464" y1="165" x2="476" y2="165"></line>
+          </g>
+          <g font-family="IBM Plex Mono, monospace" font-size="11" letter-spacing="0.1em">
+            <text x="866" y="82" fill="var(--ink2)">P_curve</text>
+            <text x="866" y="58" fill="var(--accent)">P_effective</text>
+            <text x="484" y="157" fill="var(--ink2)">offset &#948;</text>
+            <text x="60" y="30" fill="var(--ink3)">PRICE</text>
+            <text x="790" y="220" fill="var(--ink3)">ORDER FLOW q</text>
+          </g>
+          <g fill="var(--ink3)">
+            <circle cx="200" cy="176" r="2"></circle>
+            <circle cx="300" cy="170" r="2"></circle>
+            <circle cx="400" cy="162" r="2"></circle>
+            <circle cx="620" cy="130" r="2"></circle>
+            <circle cx="720" cy="110" r="2"></circle>
+          </g>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div id="live" style="border-top:1px solid var(--rule)">
+    <div style="max-width:1080px;margin:0 auto;padding:70px 28px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:20px;flex-wrap:wrap">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">03 / Live state</div>
+        <button type="button" onClick="{{ goLive }}" style="appearance:none;background:none;border:0;padding:0;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--accent)">Expanded readout</button>
+      </div>
+      <h2 style="font-family:Newsreader,serif;font-weight:400;font-size:clamp(28px,3.4vw,38px);line-height:1.15;margin:14px 0 8px;color:var(--ink)">Read from the deployed contract</h2>
+      <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:68ch;margin:0 0 26px;text-wrap:pretty">Chain head, deployment and runtime size are read over JSON-RPC at page load. Pool-keyed values — belief, &#954;, variance ratio, reserve — require a registered pool id; until one exists the panel says so rather than showing a number.</p>
+
+      <div style="border:1px solid var(--rule2);border-radius:10px;background:var(--panel);box-shadow:var(--lift);overflow:hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 20px;border-bottom:1px solid var(--rule);flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:14px;min-width:0">
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:13px;letter-spacing:0.08em;color:var(--ink)">ETH / USDC</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink3);border-left:1px solid var(--rule);padding-left:14px">Sepolia</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="width:5px;height:5px;border-radius:50%;background:{{ statusDot }}"></span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink2)">{{ statusText }}</span>
+            <button type="button" onClick="{{ refresh }}" style="appearance:none;background:none;border:1px solid var(--rule2);border-radius:4px;padding:4px 9px;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink2)">Re-read</button>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--rule)">
+          <div style="background:var(--panel);padding:20px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Belief &#948;</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:15px;line-height:1.3;color:var(--ink3);margin-top:12px;transition:opacity 150ms linear">{{ cellState }}</div>
+            <div style="font-family:'Instrument Sans',sans-serif;font-size:12px;line-height:1.5;color:var(--ink3);margin-top:8px">basis points, signed, 4 dp</div>
+          </div>
+          <div style="background:var(--panel);padding:20px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">&#954;</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:15px;line-height:1.3;color:var(--ink3);margin-top:12px;transition:opacity 150ms linear">{{ cellState }}</div>
+            <div style="font-family:'Instrument Sans',sans-serif;font-size:12px;line-height:1.5;color:var(--ink3);margin-top:8px">Q64.64, kappaOf()</div>
+          </div>
+          <div style="background:var(--panel);padding:20px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Variance ratio</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:15px;line-height:1.3;color:var(--ink3);margin-top:12px;transition:opacity 150ms linear">{{ cellState }}</div>
+            <div style="font-family:'Instrument Sans',sans-serif;font-size:12px;line-height:1.5;color:var(--ink3);margin-top:8px">target 1. Zero means no signal</div>
+          </div>
+          <div style="background:var(--panel);padding:20px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Reserve</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:15px;line-height:1.3;color:var(--ink3);margin-top:12px;transition:opacity 150ms linear">{{ cellState }}</div>
+            <div style="font-family:'Instrument Sans',sans-serif;font-size:12px;line-height:1.5;color:var(--ink3);margin-top:8px">reserveOf() against targetFor()</div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;background:var(--rule);border-top:1px solid var(--rule)">
+          <div style="background:var(--sunk);padding:18px 20px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Chain head</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:18px;color:var(--ink);margin-top:10px;transition:opacity 150ms linear">{{ blockText }}</div>
+          </div>
+          <div style="background:var(--sunk);padding:18px 20px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Chain id</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:18px;color:var(--ink);margin-top:10px;transition:opacity 150ms linear">{{ chainText }}</div>
+          </div>
+          <div style="background:var(--sunk);padding:18px 20px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Runtime size</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:18px;color:var(--ink);margin-top:10px;transition:opacity 150ms linear">{{ sizeText }}</div>
+          </div>
+          <div style="background:var(--sunk);padding:18px 20px;min-width:0">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Hook address</div>
+            <div title="{{ address }}" style="font-family:'IBM Plex Mono',monospace;font-size:14px;color:var(--ink);margin-top:12px">{{ addressShort }}</div>
+          </div>
+        </div>
+        <div style="padding:12px 20px;border-top:1px solid var(--rule);font-family:'Instrument Sans',sans-serif;font-size:13px;line-height:1.55;color:var(--ink3)">{{ statusNote }}</div>
+      </div>
+
+      <div style="margin-top:26px;border:1px solid var(--rule);border-radius:8px;overflow:hidden">
+        <div style="display:grid;grid-template-columns:110px 80px 1fr 130px 120px;gap:0;padding:11px 18px;background:var(--sunk);border-bottom:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3);min-width:620px">
+          <span>Time</span><span>Side</span><span>Size</span><span>Belief at fill</span><span>Offset</span>
+        </div>
+        <div style="padding:34px 18px;text-align:center;background:var(--panel)">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink2)">No swaps recorded</div>
+          <p style="font-family:'Instrument Sans',sans-serif;font-size:13.5px;line-height:1.6;color:var(--ink3);margin:10px auto 0;max-width:52ch">The stream populates from BeliefUpdated events on the allowlisted pool. Nothing has been emitted, so nothing is shown.</p>
+          <button type="button" onClick="{{ goTx }}" style="appearance:none;background:none;border:0;padding:0;margin-top:14px;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--accent)">View the record layout</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="border-top:1px solid var(--rule);background:var(--sunk)">
+    <div style="max-width:1080px;margin:0 auto;padding:70px 28px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">04 / Estimating the inputs</div>
+      <h2 style="font-family:Newsreader,serif;font-weight:400;font-size:clamp(28px,3.4vw,38px);line-height:1.15;margin:14px 0 26px;color:var(--ink);max-width:26ch">Three routes, one of which is a control loop</h2>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule);border-radius:8px;overflow:hidden">
+        <div style="background:var(--panel);padding:22px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">Ticks as log prices</div>
+          <p style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);margin:10px 0 0">ln P is the tick times a constant, so a tick difference is a log return. All variance estimation is integer arithmetic: no logarithm, no exponential, no precision loss.</p>
+        </div>
+        <div style="background:var(--panel);padding:22px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--accent)">Route A — variance identity</div>
+          <p style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);margin:10px 0 0">In Kyle equilibrium informed and noise flow contribute equally to order-flow variance, so U is half the mean square of signed flow. Long-horizon returns supply &#963;; short-horizon pool volatility would understate it and fail silently.</p>
+        </div>
+        <div style="background:var(--panel);padding:22px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--accent)">Route B — autocovariance</div>
+          <p style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);margin:10px 0 0">Roll's trick applied to flow rather than prices. It is a test, not a primary: if A and B diverge past the bound, the pool is out of equilibrium, &#954; shrinks toward zero and EstimatorDivergence is emitted.</p>
+        </div>
+        <div style="background:var(--panel);padding:22px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--accent)">Route C — variance ratio</div>
+          <p style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);margin:10px 0 0">The pool measures whether its own price is a martingale and tunes its gain until it is. Model-free: it needs only the definition of an efficient price, not the truth of Kyle's model.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <sc-if value="{{ showArchitecture }}" hint-placeholder-val="{{ true }}">
+  <div style="border-top:1px solid var(--rule)">
+    <div style="max-width:1080px;margin:0 auto;padding:70px 28px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">05 / Architecture</div>
+      <h2 style="font-family:Newsreader,serif;font-weight:400;font-size:clamp(28px,3.4vw,38px);line-height:1.15;margin:14px 0 8px;color:var(--ink)">The hook holds no arithmetic</h2>
+      <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:68ch;margin:0 0 34px;text-wrap:pretty">It loads state, calls pure libraries, writes state, returns values. Every formula lives in a library that is unit-testable and fuzzable without a PoolManager. That is what makes the math auditable.</p>
+      <div style="display:grid;gap:0;justify-items:center;max-width:760px;margin:0 auto">
+        <div style="width:100%;max-width:280px;border:1px solid var(--rule2);border-radius:6px;background:var(--panel);box-shadow:var(--lift);padding:14px 16px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:0.1em;color:var(--ink2)" style-hover="transform:translateY(-2px)">PoolManager</div>
+        <div style="width:1px;height:22px;background:var(--rule2)"></div>
+        <div style="width:100%;max-width:280px;border:1px solid var(--accent);border-radius:6px;background:var(--panel);box-shadow:var(--lift);padding:14px 16px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:0.1em;color:var(--ink)" style-hover="transform:translateY(-2px)">VaneHook</div>
+        <div style="width:1px;height:22px;background:var(--rule2)"></div>
+        <div style="width:100%;max-width:280px;border:1px solid var(--rule2);border-radius:6px;background:var(--panel);box-shadow:var(--lift);padding:14px 16px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:0.1em;color:var(--ink2)" style-hover="transform:translateY(-2px)">BeliefState</div>
+        <div style="width:1px;height:22px;background:var(--rule2)"></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;width:100%">
+          <div style="border:1px solid var(--rule);border-radius:6px;background:var(--panel);box-shadow:var(--lift);padding:14px 16px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:11.5px;letter-spacing:0.08em;color:var(--ink2)" style-hover="transform:translateY(-2px)">FlowVariance</div>
+          <div style="border:1px solid var(--rule);border-radius:6px;background:var(--panel);box-shadow:var(--lift);padding:14px 16px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:11.5px;letter-spacing:0.08em;color:var(--ink2)" style-hover="transform:translateY(-2px)">HorizonVariance</div>
+          <div style="border:1px solid var(--rule);border-radius:6px;background:var(--panel);box-shadow:var(--lift);padding:14px 16px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:11.5px;letter-spacing:0.08em;color:var(--ink2)" style-hover="transform:translateY(-2px)">VarianceRatio</div>
+        </div>
+        <div style="width:1px;height:22px;background:var(--rule2)"></div>
+        <div style="width:100%;max-width:280px;border:1px solid var(--rule2);border-radius:6px;background:var(--panel);box-shadow:var(--lift);padding:14px 16px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:0.1em;color:var(--ink2)" style-hover="transform:translateY(-2px)">BeliefReserve</div>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <div style="border-top:1px solid var(--rule)">
+    <div style="max-width:1080px;margin:0 auto;padding:70px 28px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">06 / Status</div>
+      <h2 style="font-family:Newsreader,serif;font-weight:400;font-size:clamp(28px,3.4vw,38px);line-height:1.15;margin:14px 0 26px;color:var(--ink)">Where the work stands</h2>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule);border-radius:8px;overflow:hidden">
+        <div style="background:var(--panel);padding:20px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Tests</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:26px;color:var(--ink);margin-top:10px">189</div>
+        </div>
+        <div style="background:var(--panel);padding:20px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Branch coverage</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:26px;color:var(--ink);margin-top:10px">78%</div>
+        </div>
+        <div style="background:var(--panel);padding:20px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Static findings</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:26px;color:var(--ink);margin-top:10px">0</div>
+        </div>
+        <div style="background:var(--panel);padding:20px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Runtime size</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:26px;color:var(--ink);margin-top:10px">17.2 KB</div>
+        </div>
+        <div style="background:var(--panel);padding:20px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Hook permissions</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:26px;color:var(--ink);margin-top:10px">4</div>
+        </div>
+      </div>
+      <div style="margin-top:22px;border:1px solid var(--rule2);border-left:2px solid var(--crit);border-radius:0 8px 8px 0;background:var(--panel);padding:20px 22px;max-width:760px">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.16em;text-transform:uppercase;color:var(--crit)">Not production ready</div>
+        <p style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.6;color:var(--ink2);margin:10px 0 0;max-width:62ch">The parameters are uncalibrated placeholders pending the replay simulator, worst-case gas is over budget, and the mechanism has not been shown to be self-funding on real flow. Do not supply liquidity to a pool using this hook.</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="audit" style="border-top:1px solid var(--rule);background:var(--sunk)">
+    <div style="max-width:1080px;margin:0 auto;padding:70px 28px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">07 / What the audit found</div>
+      <h2 style="font-family:Newsreader,serif;font-weight:400;font-size:clamp(28px,3.4vw,38px);line-height:1.15;margin:14px 0 8px;color:var(--ink)">Incident register</h2>
+      <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:68ch;margin:0 0 28px;text-wrap:pretty">Three critical defects, two of them exploitable and one that made the whole mechanism a no-op. Each has a regression test. The open rows are listed with the same weight as the closed ones.</p>
+      <div style="overflow-x:auto;border:1px solid var(--rule);border-radius:8px;background:var(--panel)">
+        <div style="min-width:660px">
+          <div style="display:grid;grid-template-columns:1fr 110px 90px;gap:0;padding:11px 20px;background:var(--sunk);border-bottom:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">
+            <span>Finding</span><span>Severity</span><span>State</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 110px 90px;gap:0;padding:16px 20px;border-bottom:1px solid var(--rule);align-items:start">
+            <span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.55;color:var(--ink);padding-right:24px">Entire reserve stealable in one transaction. The offset was sized from the requested amount, which a price limit decouples from what executes.</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--crit)">Critical</span>
+            <span style="justify-self:start;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink2);border:1px solid var(--rule2);border-radius:999px;padding:3px 9px">Fixed</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 110px 90px;gap:0;padding:16px 20px;border-bottom:1px solid var(--rule);align-items:start">
+            <span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.55;color:var(--ink);padding-right:24px">Large honest swaps bricked the swap path. Reserve scaling cannot bound the payout, because the reserve level cancels algebraically.</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--crit)">Critical</span>
+            <span style="justify-self:start;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink2);border:1px solid var(--rule2);border-radius:999px;padding:3px 9px">Fixed</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 110px 90px;gap:0;padding:16px 20px;border-bottom:1px solid var(--rule);align-items:start">
+            <span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.55;color:var(--ink);padding-right:24px">The belief could never form. One extra division by the fixed-point scale truncated every update to zero.</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--crit)">Critical</span>
+            <span style="justify-self:start;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink2);border:1px solid var(--rule2);border-radius:999px;padding:3px 9px">Fixed</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 110px 90px;gap:0;padding:16px 20px;border-bottom:1px solid var(--rule);align-items:start">
+            <span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.55;color:var(--ink);padding-right:24px">&#954; inflatable 2.16&#215; by liquidity added and removed within one block.</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--warn)">High</span>
+            <span style="justify-self:start;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink2);border:1px solid var(--rule2);border-radius:999px;padding:3px 9px">Fixed</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 110px 90px;gap:0;padding:16px 20px;border-bottom:1px solid var(--rule);align-items:start">
+            <span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.55;color:var(--ink);padding-right:24px">Reserves had no withdrawal path and were permanently stranded.</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--warn)">High</span>
+            <span style="justify-self:start;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink2);border:1px solid var(--rule2);border-radius:999px;padding:3px 9px">Fixed</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 110px 90px;gap:0;padding:16px 20px;border-bottom:1px solid var(--rule);align-items:start">
+            <span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.55;color:var(--ink);padding-right:24px">The Route B guard failed open under alternating flow, which is exactly the wash trader it exists to catch.</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink2)">Medium</span>
+            <span style="justify-self:start;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink2);border:1px solid var(--rule2);border-radius:999px;padding:3px 9px">Fixed</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 110px 90px;gap:0;padding:16px 20px;border-bottom:1px solid var(--rule);align-items:start;background:var(--accent-soft)">
+            <span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.55;color:var(--ink);padding-right:24px">Worst-case gas is 74,369 against a 45,000 budget.</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink3)">Unrated</span>
+            <span style="justify-self:start;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink);border:1px solid var(--accent);border-radius:999px;padding:3px 9px">Open</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 110px 90px;gap:0;padding:16px 20px;align-items:start;background:var(--accent-soft)">
+            <span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;line-height:1.55;color:var(--ink);padding-right:24px">Parameters are uncalibrated placeholders pending the replay simulator.</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink3)">Unrated</span>
+            <span style="justify-self:start;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink);border:1px solid var(--accent);border-radius:999px;padding:3px 9px">Open</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="border-top:1px solid var(--rule)">
+    <div style="max-width:1080px;margin:0 auto;padding:70px 28px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">08 / Prior art</div>
+      <h2 style="font-family:Newsreader,serif;font-weight:400;font-size:clamp(28px,3.4vw,38px);line-height:1.15;margin:14px 0 22px;color:var(--ink)">What this does not claim</h2>
+      <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:68ch;margin:0 0 14px;text-wrap:pretty">Kyle-style pricing of order flow is forty years old. Data-driven market making on a curve has been studied, notably in ZeroSwap and in the adaptive-curve line of work. Loss-versus-rebalancing and the variance-ratio test are both established results. None of this is new here.</p>
+      <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:68ch;margin:0 0 22px;text-wrap:pretty">What is claimed is narrower: an on-chain implementation that matches a pool's total price impact to the Kyle impact using only its own flow, settles the correction as a signed delta inside a v4 hook, and self-calibrates its gain from its own variance ratio. The framing depends on the prior-art review, which is written before the gain library is built rather than after the results.</p>
+      <div style="display:grid;gap:0;border-top:1px solid var(--rule);max-width:760px">
+        <div style="display:flex;gap:18px;padding:14px 0;border-bottom:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--ink2);flex-wrap:wrap"><span style="color:var(--ink3);min-width:70px">1985</span><span>Kyle, Continuous Auctions and Insider Trading</span></div>
+        <div style="display:flex;gap:18px;padding:14px 0;border-bottom:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--ink2);flex-wrap:wrap"><span style="color:var(--ink3);min-width:70px">1984</span><span>Roll, A Simple Implicit Measure of the Effective Bid-Ask Spread</span></div>
+        <div style="display:flex;gap:18px;padding:14px 0;border-bottom:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--ink2);flex-wrap:wrap"><span style="color:var(--ink3);min-width:70px">1988</span><span>Lo and MacKinlay, Stock Market Prices Do Not Follow Random Walks</span></div>
+        <div style="display:flex;gap:18px;padding:14px 0;border-bottom:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--ink2);flex-wrap:wrap"><span style="color:var(--ink3);min-width:70px">2022</span><span>Milionis et al., Automated Market Making and Loss-Versus-Rebalancing</span></div>
+        <div style="display:flex;gap:18px;padding:14px 0;border-bottom:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--ink2);flex-wrap:wrap"><span style="color:var(--ink3);min-width:70px">2023</span><span>Nadkarni et al., ZeroSwap: Data-driven Optimal Market Making in DeFi</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="border-top:1px solid var(--rule);background:var(--sunk)">
+    <div style="max-width:1080px;margin:0 auto;padding:44px 28px 60px;display:flex;gap:28px;justify-content:space-between;flex-wrap:wrap;align-items:end">
+      <div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:14px;letter-spacing:0.22em;color:var(--accent)">VANE</div>
+        <p style="font-family:'Instrument Sans',sans-serif;font-size:13.5px;line-height:1.6;color:var(--ink3);margin:12px 0 0;max-width:50ch">Research code. Unaudited by a third party, uncalibrated, and deployed only to a testnet. It is published so the derivation and the defects can both be read.</p>
+      </div>
+      <div style="display:grid;gap:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase">
+        <a href="https://github.com" target="_blank" rel="noreferrer" style="color:var(--ink2);border:0">Repository</a>
+        <span style="color:var(--ink3)">MIT licence</span>
+        <span style="color:var(--ink3)">Sepolia only</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+</sc-if>
+
+<sc-if value="{{ isLive }}" hint-placeholder-val="{{ false }}">
+<div style="max-width:1080px;margin:0 auto;padding:56px 28px 80px">
+  <button type="button" onClick="{{ goSite }}" style="appearance:none;background:none;border:0;padding:0;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--accent)">Back to the page</button>
+  <h2 style="font-family:Newsreader,serif;font-weight:400;font-size:clamp(28px,3.4vw,40px);line-height:1.15;margin:18px 0 8px;color:var(--ink)">Live state, expanded</h2>
+  <p style="font-family:'Instrument Sans',sans-serif;font-size:16.5px;line-height:1.62;color:var(--ink2);max-width:68ch;margin:0 0 30px;text-wrap:pretty">Four series and the event log. Each plot draws its axis and its target before it has data, so an empty frame is legible as an empty frame rather than a flat line at zero.</p>
+
+  <div style="display:flex;align-items:center;gap:12px;border:1px solid var(--rule);border-radius:8px;background:var(--panel);padding:12px 18px;margin-bottom:24px;flex-wrap:wrap">
+    <span style="width:5px;height:5px;border-radius:50%;background:{{ statusDot }}"></span>
+    <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink2)">{{ statusText }}</span>
+    <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink3)">block {{ blockText }}</span>
+    <span title="{{ address }}" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink3)">{{ addressShort }}</span>
+    <button type="button" onClick="{{ refresh }}" style="appearance:none;background:none;border:1px solid var(--rule2);border-radius:4px;padding:4px 9px;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink2);margin-left:auto">Re-read</button>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule);border-radius:8px;overflow:hidden">
+    <div style="background:var(--panel);padding:20px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Belief &#948; — basis points</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink3)">{{ cellState }}</div>
+      </div>
+      <svg viewBox="0 0 420 150" width="100%" height="auto" style="display:block;margin-top:14px" aria-label="Belief series, no data">
+        <line x1="40" y1="20" x2="40" y2="130" stroke="var(--rule)" stroke-width="1"></line>
+        <line x1="40" y1="75" x2="410" y2="75" stroke="var(--rule2)" stroke-width="1"></line>
+        <text x="8" y="79" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--ink3)">0</text>
+        <text x="140" y="68" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="0.12em" fill="var(--ink3)">AWAITING BeliefUpdated</text>
+      </svg>
+    </div>
+    <div style="background:var(--panel);padding:20px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">&#954; — Q64.64</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink3)">{{ cellState }}</div>
+      </div>
+      <svg viewBox="0 0 420 150" width="100%" height="auto" style="display:block;margin-top:14px" aria-label="Kappa series, no data">
+        <line x1="40" y1="20" x2="40" y2="130" stroke="var(--rule)" stroke-width="1"></line>
+        <line x1="40" y1="130" x2="410" y2="130" stroke="var(--rule)" stroke-width="1"></line>
+        <text x="140" y="78" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="0.12em" fill="var(--ink3)">AWAITING CONTROLLER STEP</text>
+      </svg>
+    </div>
+    <div style="background:var(--panel);padding:20px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Variance ratio</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink3)">No signal</div>
+      </div>
+      <svg viewBox="0 0 420 150" width="100%" height="auto" style="display:block;margin-top:14px" aria-label="Variance ratio against a target of one, no data">
+        <line x1="40" y1="20" x2="40" y2="130" stroke="var(--rule)" stroke-width="1"></line>
+        <line x1="40" y1="70" x2="410" y2="70" stroke="var(--accent)" stroke-width="1"></line>
+        <text x="8" y="74" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--accent)">1</text>
+        <text x="140" y="104" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="0.12em" fill="var(--ink3)">PER-BLOCK VARIANCE NOT ACCUMULATED</text>
+      </svg>
+      <p style="font-family:'Instrument Sans',sans-serif;font-size:12.5px;line-height:1.55;color:var(--ink3);margin:8px 0 0">A ratio of zero means no signal, not mean reversion. The controller declines to act on it.</p>
+    </div>
+    <div style="background:var(--panel);padding:20px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Reserve against target</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink3)">{{ cellState }}</div>
+      </div>
+      <svg viewBox="0 0 420 150" width="100%" height="auto" style="display:block;margin-top:14px" aria-label="Reserve series, no data">
+        <line x1="40" y1="20" x2="40" y2="130" stroke="var(--rule)" stroke-width="1"></line>
+        <line x1="40" y1="130" x2="410" y2="130" stroke="var(--rule)" stroke-width="1"></line>
+        <line x1="40" y1="46" x2="410" y2="46" stroke="var(--rule2)" stroke-width="1" stroke-dasharray="3 3"></line>
+        <text x="140" y="88" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="0.12em" fill="var(--ink3)">AWAITING ReserveFunded</text>
+      </svg>
+    </div>
+  </div>
+
+  <div style="margin-top:26px;border:1px solid var(--rule);border-radius:8px;overflow:hidden;background:var(--panel)">
+    <div style="padding:12px 20px;border-bottom:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">Most recent BeliefUpdated events</div>
+    <div style="overflow-x:auto">
+      <div style="min-width:620px">
+        <div style="display:grid;grid-template-columns:100px 1fr 130px 110px 110px;padding:11px 20px;background:var(--sunk);border-bottom:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3)">
+          <span>Block</span><span>Pool id</span><span>&#948; (bp)</span><span>&#954;</span><span>VR</span>
+        </div>
+        <div style="padding:34px 20px;text-align:center">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink2)">{{ cellState }}</div>
+          <p style="font-family:'Instrument Sans',sans-serif;font-size:13.5px;line-height:1.6;color:var(--ink3);margin:10px auto 0;max-width:54ch">{{ eventNote }}</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top:26px;border:1px solid var(--rule);border-radius:8px;background:var(--panel);padding:20px 22px">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Reading the units</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:18px;margin-top:14px;font-family:'Instrument Sans',sans-serif;font-size:13.5px;line-height:1.6;color:var(--ink2)">
+      <div>Belief and &#954; are Q64.64: divide by 2^64. The belief is a log-price offset, shown in basis points to four decimals.</div>
+      <div>Variance and the EWMA decays are Q32.32: divide by 2^32.</div>
+      <div>Pool ids are 66 characters and addresses 42. Both are shown truncated with the full value in the title attribute.</div>
+    </div>
+  </div>
+</div>
+</sc-if>
+
+<sc-if value="{{ isTx }}" hint-placeholder-val="{{ false }}">
+<div style="max-width:900px;margin:0 auto;padding:56px 28px 80px">
+  <button type="button" onClick="{{ goSite }}" style="appearance:none;background:none;border:0;padding:0;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--accent)">Back to the page</button>
+  <div style="margin-top:18px;border:1px solid var(--rule2);border-left:2px solid var(--accent);border-radius:0 8px 8px 0;background:var(--accent-soft);padding:14px 18px">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink)">Layout only — no swap recorded</div>
+    <p style="font-family:'Instrument Sans',sans-serif;font-size:13.5px;line-height:1.6;color:var(--ink2);margin:8px 0 0;max-width:60ch">This is the record a single swap will produce. Every field is labelled and empty. No illustrative values are shown, because a reader cannot tell an example from a measurement.</p>
+  </div>
+
+  <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink3);margin-top:38px">Transaction</div>
+  <h2 style="font-family:'IBM Plex Mono',monospace;font-weight:500;font-size:clamp(24px,4vw,34px);letter-spacing:0.04em;margin:12px 0 0;color:var(--ink)">0x&#8230;</h2>
+
+  <div style="margin-top:30px;border:1px solid var(--rule2);border-radius:10px;background:var(--panel);box-shadow:var(--lift);overflow:hidden">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;background:var(--rule)">
+      <div style="background:var(--panel);padding:24px">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Curve price</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:22px;color:var(--ink3);margin-top:12px">{{ cellState }}</div>
+      </div>
+      <div style="background:var(--panel);padding:24px;border-left:2px solid var(--accent)">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--accent)">VANE price</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:22px;color:var(--ink3);margin-top:12px">{{ cellState }}</div>
+      </div>
+    </div>
+    <div style="padding:22px;border-top:1px solid var(--rule);background:var(--sunk)">
+      <svg viewBox="0 0 820 96" width="100%" height="auto" style="display:block" aria-label="Vertical offset between the curve price and the VANE price">
+        <line x1="20" y1="62" x2="800" y2="62" stroke="var(--ink2)" stroke-width="1.5"></line>
+        <line x1="20" y1="38" x2="800" y2="38" stroke="var(--accent)" stroke-width="1.5"></line>
+        <g stroke="var(--ink3)" stroke-width="1">
+          <line x1="420" y1="38" x2="420" y2="62"></line>
+          <line x1="414" y1="38" x2="426" y2="38"></line>
+          <line x1="414" y1="62" x2="426" y2="62"></line>
+        </g>
+        <g font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="0.12em" fill="var(--ink3)">
+          <text x="20" y="26">P_effective</text>
+          <text x="20" y="86">P_curve</text>
+          <text x="434" y="54">&#948;</text>
+        </g>
+      </svg>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--rule);border-top:1px solid var(--rule)">
+      <div style="background:var(--panel);padding:18px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Side</div><div style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink3);margin-top:10px">{{ cellState }}</div></div>
+      <div style="background:var(--panel);padding:18px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Notional</div><div style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink3);margin-top:10px">{{ cellState }}</div></div>
+      <div style="background:var(--panel);padding:18px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Belief at fill</div><div style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink3);margin-top:10px">{{ cellState }}</div></div>
+      <div style="background:var(--panel);padding:18px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">&#954;</div><div style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink3);margin-top:10px">{{ cellState }}</div></div>
+      <div style="background:var(--panel);padding:18px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Offset settled</div><div style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink3);margin-top:10px">{{ cellState }}</div></div>
+      <div style="background:var(--panel);padding:18px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Reserve impact</div><div style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink3);margin-top:10px">{{ cellState }}</div></div>
+      <div style="background:var(--panel);padding:18px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Block</div><div style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink3);margin-top:10px">{{ cellState }}</div></div>
+      <div style="background:var(--panel);padding:18px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Pool id</div><div style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink3);margin-top:10px">{{ cellState }}</div></div>
+    </div>
+  </div>
+
+  <div style="margin-top:34px">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink3)">Lifecycle of one swap</div>
+    <div style="display:grid;gap:0;margin-top:16px;border-top:1px solid var(--rule)">
+      <div style="display:grid;grid-template-columns:34px 1fr;gap:16px;align-items:center;padding:14px 0;border-bottom:1px solid var(--rule)"><span style="width:8px;height:8px;border:1px solid var(--accent);justify-self:center"></span><span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;color:var(--ink2)">Order arrives at the PoolManager and is routed into beforeSwap.</span></div>
+      <div style="display:grid;grid-template-columns:34px 1fr;gap:16px;align-items:center;padding:14px 0;border-bottom:1px solid var(--rule)"><span style="width:8px;height:8px;border:1px solid var(--ink3);justify-self:center"></span><span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;color:var(--ink2)">The scaled belief is read and clamped. No storage is written.</span></div>
+      <div style="display:grid;grid-template-columns:34px 1fr;gap:16px;align-items:center;padding:14px 0;border-bottom:1px solid var(--rule)"><span style="width:8px;height:8px;border:1px solid var(--ink3);justify-self:center"></span><span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;color:var(--ink2)">The offset is returned as a signed delta and settled against the reserve.</span></div>
+      <div style="display:grid;grid-template-columns:34px 1fr;gap:16px;align-items:center;padding:14px 0;border-bottom:1px solid var(--rule)"><span style="width:8px;height:8px;border:1px solid var(--ink3);justify-self:center"></span><span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;color:var(--ink2)">The trade settles on the curve at the shifted price.</span></div>
+      <div style="display:grid;grid-template-columns:34px 1fr;gap:16px;align-items:center;padding:14px 0;border-bottom:1px solid var(--rule)"><span style="width:8px;height:8px;border:1px solid var(--ink3);justify-self:center"></span><span style="font-family:'Instrument Sans',sans-serif;font-size:14.5px;color:var(--ink2)">On the next block the belief decays and the flow variance updates.</span></div>
+    </div>
+  </div>
+</div>
+</sc-if>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;rpcEndpoint&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;https://ethereum-sepolia-rpc.publicnode.com&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Data source&quot;},&quot;contractAddress&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;0xA0480516F7D6ee73f0eF147808259F952780b044&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Data source&quot;},&quot;showArchitecture&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Sections&quot;},&quot;showVaneObject&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Sections&quot;}}">
+class Component extends DCLogic {
+  state = { view: "site", rpc: "loading", block: null, chainId: null, sizeKb: null };
+
+  componentDidMount() { this._probe(); }
+
+  _endpoint() { return this.props.rpcEndpoint ?? "https://ethereum-sepolia-rpc.publicnode.com"; }
+  _address() { return this.props.contractAddress ?? "0xA0480516F7D6ee73f0eF147808259F952780b044"; }
+
+  async _probe() {
+    this.setState({ rpc: "loading" });
+    const body = [
+      { jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] },
+      { jsonrpc: "2.0", id: 2, method: "eth_blockNumber", params: [] },
+      { jsonrpc: "2.0", id: 3, method: "eth_getCode", params: [this._address(), "latest"] }
+    ];
+    try {
+      const res = await fetch(this._endpoint(), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const rows = await res.json();
+      const by = {};
+      (Array.isArray(rows) ? rows : [rows]).forEach(r => { by[r.id] = r.result; });
+      const code = typeof by[3] === "string" ? by[3] : "0x";
+      const bytes = Math.max(0, (code.length - 2) / 2);
+      this.setState({
+        rpc: bytes > 0 ? "deployed" : "notdeployed",
+        chainId: by[1] ? parseInt(by[1], 16) : null,
+        block: by[2] ? parseInt(by[2], 16) : null,
+        sizeKb: bytes > 0 ? (bytes / 1024).toFixed(1) : null
+      });
+    } catch (e) {
+      this.setState({ rpc: "unreachable", block: null, chainId: null, sizeKb: null });
+    }
+  }
+
+  renderVals() {
+    const s = this.state;
+    const addr = this._address();
+    const unreachable = s.rpc === "unreachable";
+    const notDeployed = s.rpc === "notdeployed";
+    const loading = s.rpc === "loading";
+
+    const statusText = loading ? "Reading" : unreachable ? "RPC unreachable" : notDeployed ? "Not deployed" : "Deployed";
+    const statusDot = loading ? "var(--ink3)" : unreachable ? "var(--crit)" : notDeployed ? "var(--warn)" : "var(--ok)";
+    const cellState = loading ? "READING" : unreachable ? "RPC UNREACHABLE" : notDeployed ? "NOT DEPLOYED" : "NO POOL REGISTERED";
+
+    const statusNote = loading
+      ? "Reading chain head, chain id and runtime code from " + this._endpoint() + "."
+      : unreachable
+        ? "The endpoint did not answer. Nothing below was measured, so nothing below is shown as a number."
+        : notDeployed
+          ? "No runtime code at this address on the endpoint queried. The hook is not deployed there."
+          : "Deployment confirmed by eth_getCode. Pool-keyed values need an allowlisted pool id, which does not exist yet.";
+
+    const eventNote = unreachable
+      ? "The log query could not be made, so no claim is made about whether events exist."
+      : notDeployed
+        ? "There is no contract at this address to emit events."
+        : "No pool has been allowlisted, so no BeliefUpdated event has been emitted.";
+
+    const fmt = n => (n == null ? null : n.toLocaleString("en-US"));
+    const fallback = loading ? "READING" : unreachable ? "UNREACHABLE" : "UNKNOWN";
+
+    return {
+      isSite: s.view === "site",
+      isLive: s.view === "live",
+      isTx: s.view === "tx",
+      goSite: () => { this.setState({ view: "site" }); window.scrollTo(0, 0); },
+      goLive: () => { this.setState({ view: "live" }); window.scrollTo(0, 0); },
+      goTx: () => { this.setState({ view: "tx" }); window.scrollTo(0, 0); },
+      refresh: () => this._probe(),
+      showArchitecture: this.props.showArchitecture ?? true,
+      showVaneObject: this.props.showVaneObject ?? true,
+      statusText,
+      statusDot,
+      statusNote,
+      cellState,
+      eventNote,
+      address: addr,
+      addressShort: addr.slice(0, 6) + "\u2026" + addr.slice(-4),
+      blockText: fmt(s.block) ?? fallback,
+      chainText: s.chainId != null ? String(s.chainId) : fallback,
+      sizeText: s.sizeKb != null ? s.sizeKb + " KB" : fallback
+    };
+  }
+}
+
+</script>
+</body>
+</html>
