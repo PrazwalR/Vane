@@ -1,0 +1,20 @@
+# Extends the upstream default ruleset rather than replacing it, so every built-in
+# detector stays active.
+[extend]
+useDefault = true
+
+# deployments.json records the addresses of deployed contracts. They are public by
+# definition — anyone can read them off a block explorer — but gitleaks' generic-api-key
+# rule matches on the key name containing "token" plus the entropy of a hex string.
+#
+# The allowlist is scoped to that file AND to values that look like an EVM address or a
+# 32-byte hash. A genuine secret pasted into the same file would not match either shape
+# and would still be reported.
+[[rules]]
+id = "generic-api-key"
+[rules.allowlist]
+paths = ['''^deployments\.json$''']
+regexes = [
+  '''0x[0-9a-fA-F]{40}''',
+  '''0x[0-9a-fA-F]{64}''',
+]
