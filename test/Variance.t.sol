@@ -288,7 +288,7 @@ contract VarianceTest is Test {
         uint64 flowVarX32,
         int64 deltaX64
     ) public pure {
-        PoolState memory original = PoolState(lastTick, lastBlock, varOneX32, flowVarX32, deltaX64);
+        PoolState memory original = PoolState(lastTick, lastBlock, varOneX32, flowVarX32, deltaX64, false);
         PoolState memory decoded = PoolStateLib.unpackState(PoolStateLib.packState(original));
 
         assertEq(decoded.lastTick, lastTick, "lastTick must survive");
@@ -322,7 +322,7 @@ contract VarianceTest is Test {
         uint64 flowVarX32,
         int64 deltaX64
     ) public pure {
-        PoolState memory s = PoolState(lastTick, lastBlock, varOneX32, flowVarX32, deltaX64);
+        PoolState memory s = PoolState(lastTick, lastBlock, varOneX32, flowVarX32, deltaX64, false);
         bytes32 packed = PoolStateLib.packState(s);
         assertEq(uint256(packed) >> 248, 0, "top 8 bits must remain reserved and zero");
     }
@@ -331,11 +331,11 @@ contract VarianceTest is Test {
         int64 deltaMax = int64(int256(Q64x64.ONE_X64) / 100);
         assertGt(deltaMax, int64(int256(type(int32).max)), "a realistic belief exceeds int32");
 
-        PoolState memory s = PoolState(0, 0, 0, 0, deltaMax);
+        PoolState memory s = PoolState(0, 0, 0, 0, deltaMax, false);
         PoolState memory decoded = PoolStateLib.unpackState(PoolStateLib.packState(s));
         assertEq(decoded.deltaX64, deltaMax, "delta_max must survive a round trip intact");
 
-        PoolState memory negative = PoolState(0, 0, 0, 0, -deltaMax);
+        PoolState memory negative = PoolState(0, 0, 0, 0, -deltaMax, false);
         PoolState memory decodedNeg = PoolStateLib.unpackState(PoolStateLib.packState(negative));
         assertEq(decodedNeg.deltaX64, -deltaMax, "a negative belief must survive intact");
     }

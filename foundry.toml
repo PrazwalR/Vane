@@ -9,7 +9,7 @@ optimizer = true
 optimizer_runs = 800
 via_ir = false
 ffi = false
-fs_permissions = [{ access = "read", path = "./out" }]
+fs_permissions = [{ access = "read", path = "./out" }, { access = "read-write", path = "./sim/state" }]
 
 [fmt]
 line_length = 120

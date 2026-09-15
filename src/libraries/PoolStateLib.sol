@@ -7,6 +7,7 @@ struct PoolState {
     uint64 varOneX32;
     uint64 flowVarX32;
     int64 deltaX64;
+    bool saturated;
 }
 
 struct PoolStateAux {
@@ -26,6 +27,7 @@ library PoolStateLib {
     uint256 private constant OFFSET_VAR_ONE = 56;
     uint256 private constant OFFSET_FLOW_VAR = 120;
     uint256 private constant OFFSET_DELTA = 184;
+    uint256 private constant OFFSET_SATURATED = 248;
 
     uint256 private constant OFFSET_CHECKPOINT_BLOCK = 24;
     uint256 private constant OFFSET_VAR_K = 56;
@@ -38,6 +40,7 @@ library PoolStateLib {
                 | ((uint256(s.varOneX32) & MASK_64) << OFFSET_VAR_ONE)
                 | ((uint256(s.flowVarX32) & MASK_64) << OFFSET_FLOW_VAR)
                 | ((uint256(uint64(s.deltaX64)) & MASK_64) << OFFSET_DELTA)
+                | ((s.saturated ? uint256(1) : uint256(0)) << OFFSET_SATURATED)
         );
     }
 
@@ -48,6 +51,7 @@ library PoolStateLib {
         s.varOneX32 = uint64((raw >> OFFSET_VAR_ONE) & MASK_64);
         s.flowVarX32 = uint64((raw >> OFFSET_FLOW_VAR) & MASK_64);
         s.deltaX64 = int64(uint64((raw >> OFFSET_DELTA) & MASK_64));
+        s.saturated = ((raw >> OFFSET_SATURATED) & 1) == 1;
     }
 
     function packAux(PoolStateAux memory a) internal pure returns (bytes32 packed) {

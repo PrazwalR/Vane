@@ -51,6 +51,8 @@ contract VaneHook is IHooks, IUnlockCallback {
     event ReserveFunded(Currency indexed currency, uint256 amount, address indexed from);
     event ReserveWithdrawn(Currency indexed currency, uint256 amount, address indexed to);
 
+    event FlowEstimateSaturated(PoolId indexed id, uint64 flowVar, uint64 flowUnit);
+
     event BeliefScaled(PoolId indexed poolId, uint256 scaleNumerator, uint256 scaleDenominator);
 
     uint256 private constant UNIDENTIFIED_PENALTY_X32 = uint256(1 << 32) * 2;
@@ -150,6 +152,17 @@ contract VaneHook is IHooks, IUnlockCallback {
         allowlisted[id] = true;
         _flowUnitOf[id] = poolFlowUnit;
         emit PoolAllowed(id, poolFlowUnit);
+
+        // Re-allowlisting is how an operator corrects a `flowUnit` that was too small for
+        // the pool's real flow, so it is also the point at which a saturated estimate is
+        // allowed to start over. Nothing else clears the flag: the gain stays off until
+        // somebody fixes the cause.
+        PoolState memory st = PoolStateLib.unpackState(_state[id]);
+        if (st.saturated) {
+            st.saturated = false;
+            st.flowVarX32 = 0;
+            _state[id] = PoolStateLib.packState(st);
+        }
     }
 
     function disallowPool(PoolKey calldata key) external onlyOwner {
@@ -311,7 +324,10 @@ contract VaneHook is IHooks, IUnlockCallback {
         {
             int256 magnitude1 = int256(Q64x64.abs(int256(delta.amount1())));
             int256 signedNotional = params.zeroForOne ? -magnitude1 : magnitude1;
-            a.flowAccum = FlowVariance.accumulate(a.flowAccum, FlowVariance.toFlowUnits(signedNotional, flowUnitOf(id)));
+            (int64 nextAccum, bool accumSaturated) =
+                FlowVariance.accumulateChecked(a.flowAccum, FlowVariance.toFlowUnits(signedNotional, flowUnitOf(id)));
+            a.flowAccum = nextAccum;
+            if (accumSaturated) s.saturated = true;
         }
 
         hookDeltaUnspecified = _applyOffset(id, key, params, delta, s, a);
@@ -328,7 +344,10 @@ contract VaneHook is IHooks, IUnlockCallback {
         (uint160 sqrtPriceX96, int24 tickNow,,) = POOL_MANAGER.getSlot0(id);
 
         s.varOneX32 = HorizonVariance.updateVarOne(s.varOneX32, tickNow, s.lastTick, MAX_TICK_DELTA, VAR_LAMBDA_X32);
-        s.flowVarX32 = FlowVariance.updateFlowVar(s.flowVarX32, a.flowAccum, FLOW_LAMBDA_X32);
+        (uint64 nextFlowVar, bool flowVarSaturated) =
+            FlowVariance.updateFlowVarChecked(s.flowVarX32, a.flowAccum, FLOW_LAMBDA_X32);
+        s.flowVarX32 = nextFlowVar;
+        if (flowVarSaturated) s.saturated = true;
 
         int64 blockFlow = a.flowAccum;
         a.flowAccum = 0;
@@ -372,6 +391,17 @@ contract VaneHook is IHooks, IUnlockCallback {
 
         uint256 openLoop = KappaLib.kappaX64(depth, sigmaX64, noiseX64, KAPPA_MAX_X64);
         openLoop = _applyDivergenceCheck(id, s.flowVarX32, openLoop);
+
+        // A saturated flow estimate is not a small noise scale, it is an unknown one, and
+        // the two enter the gain identically: the clamp caps U while sigma keeps rising,
+        // so lambda* is inflated and kappa turns positive for no reason the market gave.
+        // Refusing to act is the only safe reading of an overflowed measurement. The flag
+        // is sticky for the pool because the EWMA carries the corrupted level forward.
+        if (s.saturated || FlowVariance.isSaturated(s.flowVarX32)) {
+            s.saturated = true;
+            emit FlowEstimateSaturated(id, s.flowVarX32, flowUnitOf(id));
+            openLoop = 0;
+        }
 
         if (s.varOneX32 == 0) {
             a.kappaX64 = uint64(openLoop);
