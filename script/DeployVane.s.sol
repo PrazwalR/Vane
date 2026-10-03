@@ -18,11 +18,30 @@ contract DeployVane is Script {
             | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
     );
 
+    error DeployVane__WrongChain(uint256 actual, uint256 expected);
+    error DeployVane__PoolManagerHasNoCode(address poolManager);
+    error DeployVane__Create2DeployerMissing(address deployer);
     error DeployVane__FlagMismatch(address mined, uint160 expected, uint160 actual);
     error DeployVane__AddressMismatch(address expected, address actual);
 
     function run() external returns (VaneHook hook) {
+        // This is the chain-agnostic deploy path, so it is the one that can reach mainnet.
+        // The guard is mandatory rather than optional: a stale POOL_MANAGER in the
+        // environment plus a different --rpc-url otherwise deploys an owner-privileged
+        // hook to the wrong chain, pointed at an address that may not be a PoolManager.
+        uint256 expectedChainId = vm.envUint("EXPECTED_CHAIN_ID");
+        if (block.chainid != expectedChainId) {
+            revert DeployVane__WrongChain(block.chainid, expectedChainId);
+        }
+
         address poolManager = vm.envAddress("POOL_MANAGER");
+        if (poolManager.code.length == 0) revert DeployVane__PoolManagerHasNoCode(poolManager);
+
+        // Without the deterministic-deployment proxy the salt is mined against an address
+        // that will never be produced, and the run reverts only after burning the deploy.
+        if (CREATE2_DEPLOYER.code.length == 0) {
+            revert DeployVane__Create2DeployerMissing(CREATE2_DEPLOYER);
+        }
         uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address owner = vm.addr(deployerKey);
 

@@ -14,8 +14,15 @@ contract InitializePool is Script {
     using PoolIdLibrary for PoolKey;
 
     error InitializePool__CurrenciesOutOfOrder(address currency0, address currency1);
+    error InitializePool__WrongChain(uint256 actual, uint256 expected);
+    error InitializePool__HookHasNoCode(address hook);
 
     function run() external {
+        uint256 expectedChainId = vm.envUint("EXPECTED_CHAIN_ID");
+        if (block.chainid != expectedChainId) {
+            revert InitializePool__WrongChain(block.chainid, expectedChainId);
+        }
+
         address poolManager = vm.envAddress("POOL_MANAGER");
         address hookAddress = vm.envAddress("VANE_HOOK");
         address token0 = vm.envAddress("TOKEN0");
@@ -25,7 +32,15 @@ contract InitializePool is Script {
         uint160 sqrtPriceX96 = uint160(vm.envUint("SQRT_PRICE_X96"));
         uint256 deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
 
+        // Required, not defaulted. The flow unit decides where the variance accumulator
+        // saturates, and a value too small for the pool's real flow holds the gain at zero
+        // for the life of the pool. Every deploy script previously used the single-argument
+        // allowlist call, so no production path could set it at all and every pool silently
+        // inherited the global default.
+        uint64 flowUnit = uint64(vm.envUint("FLOW_UNIT"));
+
         if (token0 >= token1) revert InitializePool__CurrenciesOutOfOrder(token0, token1);
+        if (hookAddress.code.length == 0) revert InitializePool__HookHasNoCode(hookAddress);
 
         PoolKey memory key = PoolKey({
             currency0: Currency.wrap(token0),
@@ -36,12 +51,13 @@ contract InitializePool is Script {
         });
 
         vm.startBroadcast(deployerKey);
-        VaneHook(hookAddress).allowPool(key);
+        VaneHook(hookAddress).allowPool(key, flowUnit);
         IPoolManager(poolManager).initialize(key, sqrtPriceX96);
         vm.stopBroadcast();
 
         console2.log("pool initialised");
         console2.log("  hook  :", hookAddress);
+        console2.log("  flowUnit (wei of currency1 per unit):", flowUnit);
         console2.logBytes32(PoolId.unwrap(key.toId()));
     }
 }

@@ -53,6 +53,8 @@ contract VaneHook is IHooks, IUnlockCallback {
 
     event FlowEstimateSaturated(PoolId indexed id, uint64 flowVar, uint64 flowUnit);
 
+    event SaturationCleared(PoolId indexed id, uint64 flowUnit);
+
     event BeliefScaled(PoolId indexed poolId, uint256 scaleNumerator, uint256 scaleDenominator);
 
     uint256 private constant UNIDENTIFIED_PENALTY_X32 = uint256(1 << 32) * 2;
@@ -80,6 +82,11 @@ contract VaneHook is IHooks, IUnlockCallback {
     uint128 private immutable RESERVE_TARGET_DEFAULT;
     uint64 private immutable MAX_DIVERGENCE_X32;
     uint64 private immutable ROUTE_B_Z_SCORE;
+
+    /// Route B's identification threshold. Both of its inputs are immutable, so it is a
+    /// constant of the deployment — it was being recomputed, square root included, on
+    /// every horizon step.
+    uint256 private immutable MIN_COV_RATIO_X32;
 
     mapping(PoolId => bytes32) internal _state;
 
@@ -126,6 +133,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         RESERVE_TARGET_DEFAULT = vaneConfig.reserveTargetDefault;
         MAX_DIVERGENCE_X32 = vaneConfig.maxEstimatorDivergenceX32;
         ROUTE_B_Z_SCORE = vaneConfig.routeBZScore;
+        MIN_COV_RATIO_X32 = FlowAutocovariance.minCovRatioX32(vaneConfig.flowLambdaX32, vaneConfig.routeBZScore);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -140,20 +148,33 @@ contract VaneHook is IHooks, IUnlockCallback {
         pendingOwner = address(0);
     }
 
+    /// Allowlists a pool at the currently configured flow unit.
+    ///
+    /// Both overloads route through one implementation deliberately. They previously
+    /// diverged: only the two-argument form recorded a flow unit and cleared a saturated
+    /// estimate, so an operator re-allowlisting a pool through this one left it
+    /// permanently disabled with nothing to indicate why.
     function allowPool(PoolKey calldata key) external onlyOwner {
-        PoolId id = key.toId();
-        allowlisted[id] = true;
-        emit PoolAllowed(id, flowUnitOf(id));
+        _allowPool(key.toId(), flowUnitOf(key.toId()));
     }
 
+    /// Allowlists a pool and sizes its flow unit.
+    ///
+    /// `poolFlowUnit` is wei of `currency1` per flow unit. It is the divisor for every
+    /// flow measurement, so it sets where the variance accumulator saturates: net
+    /// per-block flow above `2^32 * poolFlowUnit` wei overflows the estimator and the
+    /// gain is then held at zero until an operator re-allowlists with a larger value.
     function allowPool(PoolKey calldata key, uint64 poolFlowUnit) external onlyOwner {
         VaneConfigLib.validateFlowUnit(poolFlowUnit);
-        PoolId id = key.toId();
+        _allowPool(key.toId(), poolFlowUnit);
+    }
+
+    function _allowPool(PoolId id, uint64 poolFlowUnit) private {
         allowlisted[id] = true;
         _flowUnitOf[id] = poolFlowUnit;
         emit PoolAllowed(id, poolFlowUnit);
 
-        // Re-allowlisting is how an operator corrects a `flowUnit` that was too small for
+        // Re-allowlisting is how an operator corrects a flow unit that was too small for
         // the pool's real flow, so it is also the point at which a saturated estimate is
         // allowed to start over. Nothing else clears the flag: the gain stays off until
         // somebody fixes the cause.
@@ -162,6 +183,7 @@ contract VaneHook is IHooks, IUnlockCallback {
             st.saturated = false;
             st.flowVarX32 = 0;
             _state[id] = PoolStateLib.packState(st);
+            emit SaturationCleared(id, poolFlowUnit);
         }
     }
 
@@ -436,7 +458,7 @@ contract VaneHook is IHooks, IUnlockCallback {
     }
 
     function _applyDivergenceCheck(PoolId id, uint64 flowVar, uint256 openLoop) private returns (uint256) {
-        uint256 minRatio = FlowAutocovariance.minCovRatioX32(FLOW_LAMBDA_X32, ROUTE_B_Z_SCORE);
+        uint256 minRatio = MIN_COV_RATIO_X32;
         uint256 noiseB = FlowAutocovariance.noiseScale(_flowCov[id], flowVar, minRatio);
         if (noiseB == 0) {
             return FlowAutocovariance.attenuate(openLoop, MAX_DIVERGENCE_X32, UNIDENTIFIED_PENALTY_X32);
@@ -451,8 +473,11 @@ contract VaneHook is IHooks, IUnlockCallback {
         return FlowAutocovariance.attenuate(openLoop, MAX_DIVERGENCE_X32, divergence);
     }
 
-    function _scaleForReserve(PoolId id, int256 d, Currency payCurrency) private returns (int256) {
-        uint256 reserve = reserveOf(payCurrency);
+    /// `reserve` is passed in rather than read here so the payout path reads the hook's
+    /// claim balance once instead of once per consumer. Note the reserve is the hook's
+    /// GLOBAL balance in this currency, not this pool's share of it: pools sharing a
+    /// currency share one pot, which the event parameters name explicitly.
+    function _scaleForReserve(PoolId id, int256 d, Currency payCurrency, uint256 reserve) private returns (int256) {
         uint256 target = targetFor(payCurrency);
         if (reserve >= target) return d;
 
@@ -474,19 +499,25 @@ contract VaneHook is IHooks, IUnlockCallback {
         Currency unspecified = _unspecifiedCurrency(key, params);
         bool hookTakes = params.zeroForOne ? (d < 0) : (d > 0);
 
+        // Read once, on the only branch that can consume it. When the hook takes, the
+        // offset is positive and `_capToReserve` returns before touching the balance, so
+        // leaving this zero on that branch is sound and saves an external call.
+        uint256 reserve;
+
         if (!hookTakes) {
             d = BeliefState.dampPending(
                 d, BeliefState.pendingIncrement(int256(uint256(a.kappaX64)), int256(a.flowAccum))
             );
             if (d == 0) return 0;
-            d = _scaleForReserve(id, d, unspecified);
+            reserve = reserveOf(unspecified);
+            d = _scaleForReserve(id, d, unspecified, reserve);
         }
 
         d = _clampBelief(d);
         if (d == 0) return 0;
 
         int128 hookDelta = _capToReserve(
-            _signedOffset(hookTakes, OffsetDelta.offsetAmount(_unspecifiedAmount(params, delta), d)), unspecified
+            _signedOffset(hookTakes, OffsetDelta.offsetAmount(_unspecifiedAmount(params, delta), d)), reserve
         );
         if (hookDelta == 0) return 0;
 
@@ -516,12 +547,14 @@ contract VaneHook is IHooks, IUnlockCallback {
         return (params.zeroForOne == (params.amountSpecified < 0)) ? key.currency1 : key.currency0;
     }
 
-    function _capToReserve(int128 hookDeltaSpecified, Currency specified) private view returns (int128) {
-        if (hookDeltaSpecified >= 0) return hookDeltaSpecified;
+    /// Bounds a payout at what the hook actually holds. Both parameters were previously
+    /// named for the v4 `specified` currency, which is the opposite of what every caller
+    /// passes and of what `afterSwap` returns — the value is the UNSPECIFIED delta.
+    function _capToReserve(int128 hookDeltaUnspecified, uint256 available) private pure returns (int128) {
+        if (hookDeltaUnspecified >= 0) return hookDeltaUnspecified;
 
-        uint256 owed = uint256(uint128(-hookDeltaSpecified));
-        uint256 available = reserveOf(specified);
-        if (owed <= available) return hookDeltaSpecified;
+        uint256 owed = uint256(uint128(-hookDeltaUnspecified));
+        if (owed <= available) return hookDeltaUnspecified;
 
         return -int128(uint128(available));
     }

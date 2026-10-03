@@ -179,6 +179,36 @@ contract SaturationTest is Test, Deployers {
         assertEq(hook.poolState(id).flowVarX32, 0, "the corrupted level must be discarded, not carried over");
     }
 
+    /// Both allowlist overloads must behave identically with respect to saturation. They
+    /// used not to: only the two-argument form cleared the flag, so an operator who
+    /// re-allowlisted through the convenience overload left the pool permanently disabled.
+    function test_EitherAllowlistOverloadClearsSaturation() public {
+        hook.allowPool(vaneKey, 1e9);
+        hook.setVarOne(vaneKey, uint64(1 << 40));
+        for (uint256 i = 0; i < HORIZON_K + 2; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -10 ether);
+        }
+        assertTrue(hook.poolState(id).saturated, "precondition: the pool saturated");
+
+        // The single-argument form, which records no new flow unit of its own.
+        hook.allowPool(vaneKey);
+
+        assertFalse(hook.poolState(id).saturated, "the convenience overload must clear it too");
+        assertEq(hook.poolState(id).flowVarX32, 0, "the corrupted level must be discarded");
+    }
+
+    /// The convenience overload must preserve the pool's configured flow unit rather than
+    /// silently resetting it to the global default.
+    function test_ConvenienceOverloadPreservesTheConfiguredFlowUnit() public {
+        hook.allowPool(vaneKey, 1e15);
+        assertEq(hook.flowUnitOf(id), 1e15, "precondition");
+
+        hook.allowPool(vaneKey);
+
+        assertEq(hook.flowUnitOf(id), 1e15, "re-allowlisting must not discard the flow unit");
+    }
+
     function test_OnlyOwnerCanClearSaturation() public {
         hook.allowPool(vaneKey, 1e9);
         vm.prank(address(0xBAD));
