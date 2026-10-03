@@ -28,6 +28,7 @@ contract SimStateDumpTest is Test, Deployers {
     uint256 internal RESERVE = vm.envOr("SIM_RESERVE", uint256(1000 ether));
     int24 internal RANGE = int24(int256(vm.envOr("SIM_RANGE", uint256(3000))));
     uint24 internal FEE = uint24(vm.envOr("SIM_FEE", uint256(3000)));
+    uint64 internal FLOW_UNIT = uint64(vm.envOr("SIM_FLOW_UNIT", uint256(1e15)));
     int24 internal SPACING = int24(int256(vm.envOr("SIM_SPACING", uint256(60))));
 
     function test_DumpSimState() public {
@@ -43,7 +44,7 @@ contract SimStateDumpTest is Test, Deployers {
         VaneHook hook = VaneHook(payable(hookAddr));
 
         PoolKey memory vaneKey = PoolKey(currency0, currency1, FEE, SPACING, IHooks(hookAddr));
-        hook.allowPool(vaneKey, uint64(vm.envOr("SIM_FLOW_UNIT", uint256(1e15))));
+        hook.allowPool(vaneKey, FLOW_UNIT);
         manager.initialize(vaneKey, SQRT_PRICE_1_1);
         modifyLiquidityRouter.modifyLiquidity(vaneKey, ModifyLiquidityParams(-RANGE, RANGE, int256(LIQUIDITY), 0), "");
 
@@ -66,7 +67,9 @@ contract SimStateDumpTest is Test, Deployers {
         MockERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
         vm.stopPrank();
 
-        string memory manifest = string.concat(
+        // Built in two halves: one string.concat over this many arguments exhausts the
+        // stack slots the legacy codegen has available.
+        string memory head = string.concat(
             '{\n  "poolManager": "',
             vm.toString(address(manager)),
             '",\n  "swapRouter": "',
@@ -78,7 +81,10 @@ contract SimStateDumpTest is Test, Deployers {
             '",\n  "currency1": "',
             vm.toString(Currency.unwrap(currency1)),
             '",\n  "trader": "',
-            vm.toString(trader),
+            vm.toString(trader)
+        );
+
+        string memory tail = string.concat(
             '",\n  "vanePoolId": "',
             vm.toString(PoolId.unwrap(vaneKey.toId())),
             '",\n  "plainPoolId": "',
@@ -91,8 +97,15 @@ contract SimStateDumpTest is Test, Deployers {
             vm.toString(LIQUIDITY),
             '",\n  "reserve": "',
             vm.toString(RESERVE),
+            '",\n  "range": ',
+            vm.toString(int256(RANGE)),
+            ',\n  "flowUnit": "',
+            vm.toString(uint256(FLOW_UNIT)),
             '"\n}\n'
         );
+
+        string memory manifest = string.concat(head, tail);
+
         vm.writeFile("sim/state/manifest.json", manifest);
         vm.dumpState("sim/state/state.json");
     }

@@ -52,7 +52,16 @@ struct Pool {
 
 impl Pool {
     fn new(hooks: Address, id: B256, label: &'static str) -> Self {
-        Self { hooks, id, label, arb_pnl: 0.0, arb_trades: 0, noise_done: 0, failures: 0, ticks: vec![] }
+        Self {
+            hooks,
+            id,
+            label,
+            arb_pnl: 0.0,
+            arb_trades: 0,
+            noise_done: 0,
+            failures: 0,
+            ticks: vec![],
+        }
     }
 }
 
@@ -78,11 +87,22 @@ fn slot0_tick(h: &mut Harness, pool_id: B256) -> i32 {
     };
     let word = U256::from_be_slice(&out);
     let raw: u32 = (word.wrapping_shr(160) & U256::from(0xFFFFFFu32)).to();
-    if raw & 0x800000 != 0 { (raw as i32) - 0x1000000 } else { raw as i32 }
+    if raw & 0x800000 != 0 {
+        (raw as i32) - 0x1000000
+    } else {
+        raw as i32
+    }
 }
 
 /// Returns the swapper's own balance delta: negative is paid out, positive is received.
-fn do_swap(h: &mut Harness, hooks: Address, zero_for_one: bool, amount: i128) -> Option<(i128, i128)> {
+fn do_swap(
+    h: &mut Harness,
+    hooks: Address,
+    zero_for_one: bool,
+    amount: i128,
+    label: &str,
+    verbose: bool,
+) -> Option<(i128, i128)> {
     let limit = if zero_for_one {
         U160::from(MIN_SQRT + 1)
     } else {
@@ -95,11 +115,25 @@ fn do_swap(h: &mut Harness, hooks: Address, zero_for_one: bool, amount: i128) ->
             amountSpecified: I256::try_from(amount).ok()?,
             sqrtPriceLimitX96: limit,
         },
-        testSettings: TestSettings { takeClaims: false, settleUsingBurn: false },
+        testSettings: TestSettings {
+            takeClaims: false,
+            settleUsingBurn: false,
+        },
         hookData: Default::default(),
     };
     let router = h.manifest.swap_router;
-    let out = h.call(router, call.abi_encode()).ok()?;
+    let out = match h.call(router, call.abi_encode()) {
+        Ok(o) => o,
+        Err(e) => {
+            // A swap may legitimately fail on a price limit or thin liquidity. Counting
+            // that without recording the reason leaves a silent failure channel inside
+            // the instrument producing the project's headline numbers.
+            if verbose {
+                eprintln!("  [{label}] swap failed: {e}");
+            }
+            return None;
+        }
+    };
     if out.len() < 32 {
         return None;
     }
@@ -151,7 +185,14 @@ fn main() {
             // Noise first: it is uninformed, so it should not be systematically advantaged
             // by arriving after the correction.
             for t in &blk.noise {
-                match do_swap(&mut h, p.hooks, t.zero_for_one, t.amount) {
+                match do_swap(
+                    &mut h,
+                    p.hooks,
+                    t.zero_for_one,
+                    t.amount,
+                    p.label,
+                    args.trace > 0,
+                ) {
                     Some(_) => p.noise_done += 1,
                     None => p.failures += 1,
                 }
@@ -168,7 +209,14 @@ fn main() {
                 let excess = gap.abs() - fee_ln;
                 let size = (liquidity * excess / 2.0).clamp(1e15, 1e25) as i128;
                 let zero_for_one = gap < 0.0;
-                if let Some((d0, d1)) = do_swap(&mut h, p.hooks, zero_for_one, -size) {
+                if let Some((d0, d1)) = do_swap(
+                    &mut h,
+                    p.hooks,
+                    zero_for_one,
+                    -size,
+                    p.label,
+                    args.trace > 0,
+                ) {
                     // Mark the round trip to the fundamental. This is exactly the value the
                     // arbitrageur extracts from the pool, which is what LVR measures.
                     let pv = blk.fundamental_ln.exp();
@@ -185,36 +233,49 @@ fn main() {
             let id = h.manifest.vane_pool_id;
             if let Ok(b) = h.view(hook, kappaOfCall { id }.abi_encode()) {
                 let k = U256::from_be_slice(&b);
-                if k > kappa_max { kappa_max = k; }
+                if k > kappa_max {
+                    kappa_max = k;
+                }
             }
             if let Ok(b) = h.view(hook, beliefOfCall { id }.abi_encode()) {
                 let d = I256::from_be_bytes::<32>(b[..32].try_into().unwrap());
                 let a = if d < I256::ZERO { -d } else { d };
-                if a > belief_absmax { belief_absmax = a; }
+                if a > belief_absmax {
+                    belief_absmax = a;
+                }
             }
         }
 
         if args.trace > 0 && block_i % args.trace == 0 {
             let id = h.manifest.vane_pool_id;
-            let belief = h.view(hook, beliefOfCall { id }.abi_encode())
+            let belief = h
+                .view(hook, beliefOfCall { id }.abi_encode())
                 .map(|b| I256::from_be_bytes::<32>(b[..32].try_into().unwrap()))
                 .unwrap_or(I256::ZERO);
-            let kappa = h.view(hook, kappaOfCall { id }.abi_encode())
+            let kappa = h
+                .view(hook, kappaOfCall { id }.abi_encode())
                 .map(|b| U256::from_be_slice(&b))
                 .unwrap_or(U256::ZERO);
-            let st = h.view(hook, poolStateCall { id }.abi_encode()).unwrap_or_default();
-            let (var1, fvar) = if st.len() >= 160 {
-                (U256::from_be_slice(&st[64..96]), U256::from_be_slice(&st[96..128]))
-            } else { (U256::ZERO, U256::ZERO) };
-            let cv = h.view(hook, flowCovOfCall { id }.abi_encode()).unwrap_or_default();
-            let rd = |o: usize| -> i64 {
-                if cv.len() >= o + 32 {
-                    I256::from_be_bytes::<32>(cv[o..o + 32].try_into().unwrap()).as_i64()
-                } else { 0 }
+            let st = h
+                .view(hook, poolStateCall { id }.abi_encode())
+                .ok()
+                .and_then(|b| poolStateCall::abi_decode_returns(&b, false).ok());
+            let cv = h
+                .view(hook, flowCovOfCall { id }.abi_encode())
+                .ok()
+                .and_then(|b| flowCovOfCall::abi_decode_returns(&b, false).ok());
+
+            let (var1, fvar, sat) = match &st {
+                Some(r) => (r._0.varOneX32, r._0.flowVarX32, r._0.saturated),
+                None => (0, 0, false),
+            };
+            let (cov1, cov2) = match &cv {
+                Some(r) => (r._0.cov1, r._0.cov2),
+                None => (0, 0),
             };
             println!(
-                "blk {:>5} kappa={:<12} belief={:<12} varOne={:<12} flowVar={:<18} cov1={:<14} cov2={:<14} tick={}",
-                block_i, kappa, belief, var1, fvar, rd(64), rd(96),
+                "blk {:>5} kappa={:<12} belief={:<12} varOne={:<12} flowVar={:<18} cov1={:<14} cov2={:<14} sat={:<5} tick={}",
+                block_i, kappa, belief, var1, fvar, cov1, cov2, sat,
                 pools[0].ticks.last().unwrap()
             );
         }
@@ -236,28 +297,58 @@ fn main() {
     if args.json {
         println!(
             r#"{{"seed":{},"blocks":{},"sigma":{},"vane_arb_pnl":{:.6e},"plain_arb_pnl":{:.6e},"lvr_reduction_pct":{:.4},"reserve_change":{:.6e},"vane_vr5":{:.4},"plain_vr5":{:.4},"vane_failures":{},"plain_failures":{},"kappa_max":"{}","belief_absmax":"{}","liquidity":"{}","fee":{},"momentum":{}}}"#,
-            args.seed, args.blocks, args.sigma,
-            vane.arb_pnl, plain.arb_pnl, lvr_reduction, reserve_change,
-            variance_ratio(&vane.ticks, 5), variance_ratio(&plain.ticks, 5),
-            vane.failures, plain.failures, kappa_max, belief_absmax,
-            h.manifest.liquidity, h.manifest.fee, args.momentum
+            args.seed,
+            args.blocks,
+            args.sigma,
+            vane.arb_pnl,
+            plain.arb_pnl,
+            lvr_reduction,
+            reserve_change,
+            variance_ratio(&vane.ticks, 5),
+            variance_ratio(&plain.ticks, 5),
+            vane.failures,
+            plain.failures,
+            kappa_max,
+            belief_absmax,
+            h.manifest.liquidity,
+            h.manifest.fee,
+            args.momentum
         );
         return;
     }
 
-    println!("\nVANE replay — {} blocks, seed {}, sigma {}\n", args.blocks, args.seed, args.sigma);
-    println!("{:<8} {:>16} {:>10} {:>10} {:>9} {:>9}", "pool", "arb PnL (ETH)", "arb trades", "noise", "VR(5)", "fails");
+    println!(
+        "\nVANE replay — {} blocks, seed {}, sigma {}\n  pool: liquidity {:.3e}, range +/-{} ticks, fee {} bps, flowUnit {:.0e}\n",
+        args.blocks,
+        args.seed,
+        args.sigma,
+        liquidity,
+        h.manifest.range_ticks(),
+        h.manifest.fee as f64 / 100.0,
+        h.manifest.flow_unit()
+    );
+    println!(
+        "{:<8} {:>16} {:>10} {:>10} {:>9} {:>9}",
+        "pool", "arb PnL (ETH)", "arb trades", "noise", "VR(5)", "fails"
+    );
     for p in &pools {
         println!(
             "{:<8} {:>16.4} {:>10} {:>10} {:>9.3} {:>9}",
-            p.label, p.arb_pnl / 1e18, p.arb_trades, p.noise_done,
-            variance_ratio(&p.ticks, 5), p.failures
+            p.label,
+            p.arb_pnl / 1e18,
+            p.arb_trades,
+            p.noise_done,
+            variance_ratio(&p.ticks, 5),
+            p.failures
         );
     }
     println!("\nmax kappa (Q64.64)          : {}", kappa_max);
     println!("max |belief| (Q64.64)       : {}", belief_absmax);
     println!("LVR reduction vs plain pool : {:>8.2} %", lvr_reduction);
-    println!("Hook reserve change         : {:>8.4} ETH", reserve_change / 1e18);
+    println!(
+        "Hook reserve change         : {:>8.4} ETH",
+        reserve_change / 1e18
+    );
     println!(
         "  currency0 {:>+10.4}   currency1 {:>+10.4}",
         (reserve0_end - reserve0_start) / 1e18,

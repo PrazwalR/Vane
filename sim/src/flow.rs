@@ -76,7 +76,10 @@ pub fn generate(p: FlowParams, seed: u64) -> Vec<Block> {
                 amount: -(size as i128),
             });
         }
-        out.push(Block { fundamental_ln: v, noise });
+        out.push(Block {
+            fundamental_ln: v,
+            noise,
+        });
     }
     out
 }
@@ -127,4 +130,189 @@ pub fn variance_ratio(ticks: &[i32], k: usize) -> f64 {
         return f64::NAN;
     }
     vk / (k as f64 * v1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a pure random walk in tick space from the same generator the simulator uses.
+    fn random_walk(n: usize, step: f64, seed: u64) -> Vec<i32> {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut t = 0.0f64;
+        (0..n)
+            .map(|_| {
+                t += step * normal(&mut rng);
+                t.round() as i32
+            })
+            .collect()
+    }
+
+    /// The claim the whole activation analysis rests on: under a martingale price the
+    /// variance ratio is one. If this estimator were biased, `VR > 4` would be measuring
+    /// the estimator rather than the market.
+    #[test]
+    fn variance_ratio_of_a_random_walk_is_about_one() {
+        for k in [2usize, 5, 10] {
+            let mut acc = 0.0;
+            let trials = 40;
+            for seed in 0..trials {
+                acc += variance_ratio(&random_walk(4000, 30.0, seed), k);
+            }
+            let mean = acc / trials as f64;
+            assert!(
+                (mean - 1.0).abs() < 0.15,
+                "VR({k}) on a random walk should be ~1, got {mean}"
+            );
+        }
+    }
+
+    /// A trending series must read above one, and a mean-reverting series below one.
+    /// Getting these backwards would invert the activation condition.
+    #[test]
+    fn variance_ratio_separates_trending_from_mean_reverting() {
+        // Positively autocorrelated increments, not a drift. The ratio is computed on
+        // demeaned returns, so a constant drift moves the mean and leaves the variance
+        // ratio at one — what lifts it above one is persistence in the increments, which
+        // is exactly what the `momentum` parameter models.
+        let mut rng = ChaCha8Rng::seed_from_u64(99);
+        let (mut t, mut step) = (0.0f64, 0.0f64);
+        let trending: Vec<i32> = (0..4000)
+            .map(|_| {
+                step = 0.85 * step + 12.0 * normal(&mut rng);
+                t += step;
+                t.round() as i32
+            })
+            .collect();
+        let vr = variance_ratio(&trending, 5);
+        assert!(
+            vr > 2.0,
+            "autocorrelated increments must read well above one, got {vr}"
+        );
+
+        let reverting: Vec<i32> = (0..2000).map(|i| if i % 2 == 0 { 0 } else { 40 }).collect();
+        assert!(
+            variance_ratio(&reverting, 5) < 0.5,
+            "an alternating series must read well below one, got {}",
+            variance_ratio(&reverting, 5)
+        );
+    }
+
+    /// Momentum is the knob the activation experiment turns, so it must actually move the
+    /// variance ratio monotonically.
+    #[test]
+    fn momentum_raises_the_variance_ratio() {
+        let vr_at = |m: f64| {
+            let p = FlowParams {
+                blocks: 3000,
+                sigma: 0.0004,
+                momentum: m,
+                ..Default::default()
+            };
+            let blocks = generate(p, 7);
+            // Read the fundamental itself in tick space; this isolates the generator from
+            // the pool so the test measures only what `momentum` does.
+            let ticks: Vec<i32> = blocks
+                .iter()
+                .map(|b| (b.fundamental_ln / LN_1_0001).round() as i32)
+                .collect();
+            variance_ratio(&ticks, 5)
+        };
+
+        let (flat, trend) = (vr_at(0.0), vr_at(0.9));
+        assert!(
+            trend > flat * 1.5,
+            "momentum 0.9 should raise VR well above momentum 0 ({flat} -> {trend})"
+        );
+    }
+
+    #[test]
+    fn variance_ratio_refuses_a_series_too_short_to_measure() {
+        assert!(variance_ratio(&[1, 2, 3], 5).is_nan());
+        assert!(variance_ratio(&[], 2).is_nan());
+        // A constant series has zero one-step variance and no defined ratio.
+        assert!(variance_ratio(&[7; 200], 5).is_nan());
+    }
+
+    #[test]
+    fn normal_has_unit_moments() {
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        let xs: Vec<f64> = (0..20_000).map(|_| normal(&mut rng)).collect();
+        let n = xs.len() as f64;
+        let mean = xs.iter().sum::<f64>() / n;
+        let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        assert!(mean.abs() < 0.05, "mean should be ~0, got {mean}");
+        assert!((var - 1.0).abs() < 0.08, "variance should be ~1, got {var}");
+    }
+
+    #[test]
+    fn poisson_matches_its_rate() {
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
+        for lambda in [1.0f64, 3.0, 20.0] {
+            let n = 20_000;
+            let total: usize = (0..n).map(|_| poisson(&mut rng, lambda)).sum();
+            let mean = total as f64 / n as f64;
+            assert!(
+                (mean - lambda).abs() < lambda * 0.1,
+                "poisson({lambda}) mean should be ~{lambda}, got {mean}"
+            );
+        }
+    }
+
+    /// Reproducibility is the whole basis for comparing two pools on "identical" flow.
+    #[test]
+    fn generation_is_deterministic_in_the_seed() {
+        let p = FlowParams {
+            blocks: 200,
+            ..Default::default()
+        };
+        let a = generate(p, 42);
+        let b = generate(p, 42);
+        let c = generate(p, 43);
+
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.fundamental_ln.to_bits(), y.fundamental_ln.to_bits());
+            assert_eq!(x.noise.len(), y.noise.len());
+            for (m, n) in x.noise.iter().zip(y.noise.iter()) {
+                assert_eq!(m.amount, n.amount);
+                assert_eq!(m.zero_for_one, n.zero_for_one);
+            }
+        }
+        assert!(
+            a.iter()
+                .zip(c.iter())
+                .any(|(x, y)| x.fundamental_ln != y.fundamental_ln),
+            "a different seed must produce different flow"
+        );
+    }
+
+    /// Noise sizes are clamped; a clamp that always binds would silently replace the
+    /// lognormal with a constant.
+    #[test]
+    fn noise_sizes_vary_and_stay_within_their_clamp() {
+        let p = FlowParams {
+            blocks: 500,
+            noise_rate: 10.0,
+            ..Default::default()
+        };
+        let sizes: Vec<i128> = generate(p, 5)
+            .iter()
+            .flat_map(|b| b.noise.iter().map(|t| -t.amount))
+            .collect();
+
+        assert!(
+            sizes.len() > 1000,
+            "expected a usable sample, got {}",
+            sizes.len()
+        );
+        assert!(sizes
+            .iter()
+            .all(|&s| (1e15 as i128..=5e22 as i128).contains(&s)));
+        let distinct = sizes.iter().collect::<std::collections::HashSet<_>>().len();
+        assert!(
+            distinct > sizes.len() / 2,
+            "sizes should be dispersed, got {distinct} distinct"
+        );
+    }
 }

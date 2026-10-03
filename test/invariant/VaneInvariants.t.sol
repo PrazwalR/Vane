@@ -140,7 +140,15 @@ contract VaneInvariantsTest is StdInvariant, Test, Deployers {
     /// invariants once before any calls are made, where the counters are legitimately zero.
     /// afterInvariant fires at the end of each run, which is the only point at which
     /// "did the handler do real work" is a meaningful question.
+    /// A replay of a shrunk counterexample runs only the handful of calls Foundry kept,
+    /// which may contain no swap at all. Asserting the campaign properties against that
+    /// turns every replay into a second, misleading failure that hides the first one —
+    /// so below this many calls the guard has nothing meaningful to say and stands down.
+    uint256 internal constant MIN_CALLS_FOR_VACUITY_CHECK = 32;
+
     function afterInvariant() public view {
+        if (handler.callCount() < MIN_CALLS_FOR_VACUITY_CHECK) return;
+
         assertGt(handler.swapCount(), 0, "handler must have attempted swaps");
 
         uint256 landed = handler.swapCount() - handler.revertCount();

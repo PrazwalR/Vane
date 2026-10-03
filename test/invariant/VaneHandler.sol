@@ -47,6 +47,11 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
     uint256 public swapCount;
     uint256 public revertCount;
 
+    /// Every handler entry point increments this. The anti-vacuity guard needs to tell a
+    /// full campaign apart from Foundry replaying a single shrunk counterexample, and a
+    /// shrunk sequence may legitimately contain no swaps at all.
+    uint256 public callCount;
+
     constructor(
         IPoolManager _manager,
         VaneHookHarness _hook,
@@ -79,6 +84,7 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
     /// A swap over nine orders of magnitude, either direction, either exactness mode, and
     /// occasionally with the price limit pinned next to spot so almost nothing executes.
     function swap(uint256 rawAmount, bool zeroForOne, bool exactInput, uint8 limitMode) external {
+        callCount++;
         _mintAndApprove();
 
         uint256 amount = bound(rawAmount, 1, 500_000 ether);
@@ -109,10 +115,12 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
     }
 
     function rollBlocks(uint8 rawBlocks) external {
+        callCount++;
         vm.roll(block.number + bound(uint256(rawBlocks), 1, 64));
     }
 
     function addLiquidity(uint128 rawLiquidity) external {
+        callCount++;
         _mintAndApprove();
         uint256 liq = bound(uint256(rawLiquidity), 1e15, 100_000 ether);
         try liquidityRouter.modifyLiquidity(poolKey, ModifyLiquidityParams(-60000, 60000, int256(liq), 0), "") {}
@@ -120,12 +128,14 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
     }
 
     function removeLiquidity(uint128 rawLiquidity) external {
+        callCount++;
         uint256 liq = bound(uint256(rawLiquidity), 1e15, 50_000 ether);
         try liquidityRouter.modifyLiquidity(poolKey, ModifyLiquidityParams(-60000, 60000, -int256(liq), 0), "") {}
             catch {}
     }
 
     function fundReserve(uint128 rawAmount, bool which) external {
+        callCount++;
         _mintAndApprove();
         uint256 amount = bound(uint256(rawAmount), 1, 10_000 ether);
         Currency c = which ? currency0 : currency1;
@@ -136,6 +146,7 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
     }
 
     function withdrawReserve(uint128 rawAmount, bool which) external {
+        callCount++;
         Currency c = which ? currency0 : currency1;
         uint256 held = hook.reserveOf(c);
         if (held == 0) return;
@@ -149,6 +160,7 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
     /// Trades the second pool so cross-pool isolation is exercised under real traffic
     /// rather than against an untouched pool.
     function swapOtherPool(uint128 rawAmount, bool zeroForOne) external {
+        callCount++;
         _mintAndApprove();
         uint256 amount = bound(uint256(rawAmount), 1e12, 100 ether);
         try swapRouter.swap(

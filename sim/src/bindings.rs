@@ -1,4 +1,10 @@
-//! ABI surface the replay engine touches. Types mirror the on-chain structs exactly.
+//! ABI surface the replay engine touches.
+//!
+//! These must match `src/` field for field, because the engine decodes through the
+//! generated types rather than by byte offset. A hand-mirrored layout that has drifted
+//! decodes successfully and returns the wrong field, which is the worst failure mode
+//! available to a measuring instrument — `PoolState.saturated` was missing here while the
+//! trace claimed to report the hook's state.
 
 use alloy_sol_types::sol;
 
@@ -39,16 +45,16 @@ sol! {
         uint64 varOneX32;
         uint64 flowVarX32;
         int64 deltaX64;
+        bool saturated;
     }
     function poolState(bytes32 id) external view returns (PoolState);
 
     struct FlowCovState {
-        int64 prevFlow;
-        int64 prevPrevFlow;
+        int64 prevFlow1;
+        int64 prevFlow2;
         int64 cov1;
         int64 cov2;
     }
     function flowCovOf(bytes32 id) external view returns (FlowCovState);
     function extsload(bytes32 slot) external view returns (bytes32);
-    function balanceOf(address who) external view returns (uint256);
 }
