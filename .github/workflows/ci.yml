@@ -66,6 +66,26 @@ jobs:
       - name: Gas snapshot
         run: forge snapshot --check
 
+      # The site publishes figures about its own rigour. Every one of them was hand-typed
+      # and every one had drifted, so they are generated and committed — and this step
+      # fails if the committed copy no longer matches what the toolchain reports.
+      # Coverage is excluded from the comparison because it is refreshed separately.
+      - name: Check published status figures are current
+        run: |
+          cp frontend/generated/status.json /tmp/status.committed.json
+          ./scripts/collect-status.sh >/dev/null
+          python3 - <<'PY'
+          import json, sys
+          drop = {"generatedAt", "lineCoveragePct", "branchCoveragePct"}
+          a = {k: v for k, v in json.load(open("/tmp/status.committed.json")).items() if k not in drop}
+          b = {k: v for k, v in json.load(open("frontend/generated/status.json")).items() if k not in drop}
+          if a != b:
+              diff = {k: (a.get(k), b.get(k)) for k in set(a) | set(b) if a.get(k) != b.get(k)}
+              sys.exit(f"frontend/generated/status.json is stale (committed, actual): {diff}\n"
+                       f"run ./scripts/collect-status.sh --coverage and commit the result")
+          print("published figures match the toolchain")
+          PY
+
   simulator:
     runs-on: ubuntu-latest
     steps:
