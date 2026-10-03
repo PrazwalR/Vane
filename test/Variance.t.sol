@@ -73,13 +73,13 @@ contract VarianceTest is Test {
 
         uint64 varOne = 0;
         for (uint256 i = 0; i < 2000; i++) {
-            varOne = HorizonVariance.updateVarOne(varOne, perBlockMove, 0, MAX_TICK_DELTA, LAMBDA_X32);
+            (varOne,) = HorizonVariance.updateVarOne(varOne, perBlockMove, 0, MAX_TICK_DELTA, LAMBDA_X32);
         }
 
         int24 horizonMove = int24(int256(uint256(HORIZON_K)) * int256(perBlockMove));
         uint64 varK = 0;
         for (uint256 i = 0; i < 2000; i++) {
-            varK = HorizonVariance.updateVarK(varK, horizonMove, 0, MAX_TICK_DELTA, HORIZON_K, LAMBDA_X32);
+            (varK,) = HorizonVariance.updateVarK(varK, horizonMove, 0, MAX_TICK_DELTA, HORIZON_K, LAMBDA_X32);
         }
 
         uint256 sigmaFromHorizon = HorizonVariance.sigmaX64(varK, HORIZON_K);
@@ -130,15 +130,52 @@ contract VarianceTest is Test {
     }
 
     function test_VarK_SaturatesRatherThanRevertingOnExtremeReturn() public pure {
-        uint64 result = HorizonVariance.updateVarK(0, 40_000, -40_000, MAX_TICK_DELTA, 100, LAMBDA_X32);
+        (uint64 result,) = HorizonVariance.updateVarK(0, 40_000, -40_000, MAX_TICK_DELTA, 100, LAMBDA_X32);
         assertGt(result, 0, "an extreme move must still register");
     }
 
-    function testFuzz_VarK_NeverReverts(int24 tickNow, int24 checkpointTick, uint16 horizon) public pure {
+    /// varK must never revert — a revert here is inside afterSwap and bricks the pool —
+    /// and when it does hit its ceiling it must SAY SO rather than return a pinned value
+    /// that reads as a small variance. The old assertion was `result <= type(uint64).max`
+    /// on a uint64, which no implementation could fail.
+    function testFuzz_VarK_NeverRevertsAndReportsItsCeiling(int24 tickNow, int24 checkpointTick, uint16 horizon)
+        public
+        pure
+    {
         uint16 h = uint16(bound(uint256(horizon), 1, type(uint16).max));
-        uint64 result =
+        (uint64 result, bool saturated) =
             HorizonVariance.updateVarK(type(uint64).max / 2, tickNow, checkpointTick, MAX_TICK_DELTA, h, LAMBDA_X32);
-        assertLe(result, type(uint64).max, "varK must stay in range without reverting");
+
+        assertEq(saturated, result == type(uint64).max, "saturation must be reported exactly when it occurs");
+        assertEq(HorizonVariance.isSaturated(result), saturated, "isSaturated must agree with the reported flag");
+    }
+
+    /// The reachability that makes the above matter: the clamp scales with elapsed blocks
+    /// while the accumulator ceiling does not, so a long enough gap saturates varK from
+    /// zero in a single step. With the shipped parameters that gap is 328 blocks.
+    function test_VarK_SaturatesFromZeroAfterALongGap() public pure {
+        uint16 shortGap = 100;
+        (, bool satShort) = HorizonVariance.updateVarK(
+            0, int24(int256(uint256(shortGap)) * MAX_TICK_DELTA), 0, MAX_TICK_DELTA, shortGap, LAMBDA_X32
+        );
+        assertFalse(satShort, "a 100-block gap must still be measurable");
+
+        uint16 longGap = 328;
+        (uint64 v, bool satLong) = HorizonVariance.updateVarK(
+            0, int24(int256(uint256(longGap)) * MAX_TICK_DELTA), 0, MAX_TICK_DELTA, longGap, LAMBDA_X32
+        );
+        assertTrue(satLong, "a 328-block gap saturates varK in one step");
+        assertEq(v, type(uint64).max, "and pins it at the ceiling");
+    }
+
+    /// Why a pinned varK is dangerous rather than merely imprecise: it inflates sigma by
+    /// three orders of magnitude, which drives lambdaStar and therefore the gain upward.
+    function test_SaturatedVarKInflatesSigma() public pure {
+        uint256 honest = HorizonVariance.sigmaX64(1e12, 20);
+        uint256 pinned = HorizonVariance.sigmaX64(type(uint64).max, 20);
+
+        assertGt(pinned, honest * 1000, "a pinned varK must be recognised as a large sigma, not a small one");
+        assertGt(pinned, uint256(1) << 64, "and it exceeds a volatility of 1.0 per block, which is not a market");
     }
 
     function testFuzz_Sigma_NeverRevertsOrOverflows(uint64 varK, uint16 k) public pure {
@@ -242,7 +279,7 @@ contract VarianceTest is Test {
         uint64 varK = 0;
         int24 horizonMove = int24(int256(uint256(HORIZON_K)) * int256(perBlockMove));
         for (uint256 i = 0; i < 2000; i++) {
-            varK = HorizonVariance.updateVarK(varK, horizonMove, 0, MAX_TICK_DELTA, HORIZON_K, LAMBDA_X32);
+            (varK,) = HorizonVariance.updateVarK(varK, horizonMove, 0, MAX_TICK_DELTA, HORIZON_K, LAMBDA_X32);
         }
         uint256 sigmaHorizon = HorizonVariance.sigmaX64(varK, HORIZON_K);
 
@@ -251,7 +288,7 @@ contract VarianceTest is Test {
 
         uint64 varOne = 0;
         for (uint256 i = 0; i < 2000; i++) {
-            varOne = HorizonVariance.updateVarOne(varOne, perBlockMove, 0, MAX_TICK_DELTA, LAMBDA_X32);
+            (varOne,) = HorizonVariance.updateVarOne(varOne, perBlockMove, 0, MAX_TICK_DELTA, LAMBDA_X32);
         }
         uint256 sigmaPerBlock = HorizonVariance.sigmaX64(varOne, 1);
 

@@ -367,13 +367,26 @@ contract VaneHook is IHooks, IUnlockCallback {
     function _advanceBlock(PoolId id, PoolState memory s, PoolStateAux memory a) private {
         (uint160 sqrtPriceX96, int24 tickNow,,) = POOL_MANAGER.getSlot0(id);
 
-        s.varOneX32 = HorizonVariance.updateVarOne(s.varOneX32, tickNow, s.lastTick, MAX_TICK_DELTA, VAR_LAMBDA_X32);
+        (uint64 nextVarOne, bool varOneSaturated) =
+            HorizonVariance.updateVarOne(s.varOneX32, tickNow, s.lastTick, MAX_TICK_DELTA, VAR_LAMBDA_X32);
+        s.varOneX32 = nextVarOne;
+        if (varOneSaturated) s.saturated = true;
         (uint64 nextFlowVar, bool flowVarSaturated) =
             FlowVariance.updateFlowVarChecked(s.flowVarUnitsSq, a.flowAccum, FLOW_LAMBDA_X32);
         s.flowVarUnitsSq = nextFlowVar;
         if (flowVarSaturated) s.saturated = true;
 
+        // A clamped accumulator sits exactly on an int64 bound, and at that point it is no
+        // longer a measurement of anything — the library says so in its own comment. Both
+        // consumers below would otherwise treat the fabricated magnitude as real: it pins
+        // the belief straight to its clamp through BeliefState.update, and it writes a
+        // fictitious sample into the autocovariance that Route B then carries for two more
+        // blocks. A flow we could not measure contributes nothing instead.
         int64 blockFlow = a.flowAccum;
+        if (blockFlow == type(int64).max || blockFlow == type(int64).min) {
+            s.saturated = true;
+            blockFlow = 0;
+        }
         a.flowAccum = 0;
 
         _flowCov[id] = FlowAutocovariance.update(_flowCov[id], blockFlow, FLOW_LAMBDA_X32);
@@ -407,8 +420,13 @@ contract VaneHook is IHooks, IUnlockCallback {
         uint256 elapsed = uint256(uint32(block.number) - a.checkpointBlock);
         uint16 horizon = elapsed > type(uint16).max ? type(uint16).max : uint16(elapsed);
 
-        a.varKX32 =
-            HorizonVariance.updateVarK(a.varKX32, tickNow, a.checkpointTick, MAX_TICK_DELTA, horizon, VAR_LAMBDA_X32);
+        {
+            (uint64 nextVarK, bool varKSaturated) = HorizonVariance.updateVarK(
+                a.varKX32, tickNow, a.checkpointTick, MAX_TICK_DELTA, horizon, VAR_LAMBDA_X32
+            );
+            a.varKX32 = nextVarK;
+            if (varKSaturated) s.saturated = true;
+        }
         a.checkpointTick = tickNow;
         a.checkpointBlock = uint32(block.number);
 
@@ -423,12 +441,25 @@ contract VaneHook is IHooks, IUnlockCallback {
         // A saturated flow estimate is not a small noise scale, it is an unknown one, and
         // the two enter the gain identically: the clamp caps U while sigma keeps rising,
         // so lambda* is inflated and kappa turns positive for no reason the market gave.
-        // Refusing to act is the only safe reading of an overflowed measurement. The flag
-        // is sticky for the pool because the EWMA carries the corrupted level forward.
-        if (s.saturated || FlowVariance.isSaturated(s.flowVarUnitsSq)) {
+        // Refusing to act is the only safe reading of an overflowed measurement, and the
+        // flag is sticky because the EWMA carries the corrupted level forward.
+        //
+        // The gain is zeroed directly rather than by zeroing the controller's anchor.
+        // Setting `openLoop = 0` and falling through to VarianceRatio.step looks
+        // equivalent and is not: with a zero anchor the drive term vanishes but the leak
+        // term becomes rho * kappa, which removes only one percent of the gain per
+        // horizon step. A saturated pool kept 99% of its gain for the next horizon and
+        // half of it for 1,380 blocks — the same fail-open shape this guard exists to
+        // close, just slower. Returning here also skips the variance-ratio step, which
+        // would otherwise be computed from the saturated varK.
+        if (
+            s.saturated || FlowVariance.isSaturated(s.flowVarUnitsSq) || HorizonVariance.isSaturated(a.varKX32)
+                || HorizonVariance.isSaturated(s.varOneX32)
+        ) {
             s.saturated = true;
             emit FlowEstimateSaturated(id, s.flowVarUnitsSq, flowUnitOf(id));
-            openLoop = 0;
+            a.kappaX64 = 0;
+            return 0;
         }
 
         if (s.varOneX32 == 0) {

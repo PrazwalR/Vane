@@ -13,14 +13,19 @@ library HorizonVariance {
         squared = magnitude * magnitude;
     }
 
+    /// A clamped variance is not a small variance, it is an unknown one, and the two feed
+    /// `sigmaX64` identically — a pinned varK inflates sigma by about 4,300x, which pins
+    /// the gain at its cap. So saturation is reported rather than swallowed, the same way
+    /// FlowVariance reports it, and the caller is expected to stop trusting the estimate.
     function updateVarOne(uint64 varOneX32, int24 tickNow, int24 tickPrev, int24 maxTickDelta, uint64 lambdaX32)
         internal
         pure
-        returns (uint64)
+        returns (uint64 value, bool saturated)
     {
         uint256 sample = clampedSquare(tickNow, tickPrev, maxTickDelta);
         uint256 next = Q64x64.ewmaX32(uint256(varOneX32), sample << 32, uint256(lambdaX32));
-        return next > type(uint64).max ? type(uint64).max : uint64(next);
+        if (next >= type(uint64).max) return (type(uint64).max, true);
+        return (uint64(next), false);
     }
 
     function updateVarK(
@@ -30,9 +35,12 @@ library HorizonVariance {
         int24 maxTickDelta,
         uint16 horizonK,
         uint64 lambdaX32
-    ) internal pure returns (uint64) {
+    ) internal pure returns (uint64 value, bool saturated) {
         int256 rK = int256(tickNow) - int256(checkpointTick);
 
+        // The clamp scales with the elapsed horizon, so it grows without bound while the
+        // accumulator's ceiling does not. With the shipped parameters a gap of 328 blocks
+        // is enough for a single step to saturate varK from zero.
         int256 horizonClamp = int256(maxTickDelta) * int256(uint256(horizonK));
         if (rK > horizonClamp) rK = horizonClamp;
         if (rK < -horizonClamp) rK = -horizonClamp;
@@ -41,7 +49,12 @@ library HorizonVariance {
         uint256 sample = magnitude * magnitude;
 
         uint256 next = Q64x64.ewmaX32(uint256(varKX32), sample << 32, uint256(lambdaX32));
-        return next > type(uint64).max ? type(uint64).max : uint64(next);
+        if (next >= type(uint64).max) return (type(uint64).max, true);
+        return (uint64(next), false);
+    }
+
+    function isSaturated(uint64 varX32) internal pure returns (bool) {
+        return varX32 == type(uint64).max;
     }
 
     function sigmaX64(uint64 varKX32, uint16 horizonK) internal pure returns (uint256) {

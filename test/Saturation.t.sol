@@ -19,6 +19,7 @@ import {FlowVariance} from "../src/libraries/FlowVariance.sol";
 import {KappaLib} from "../src/libraries/KappaLib.sol";
 import {PoolState, PoolStateLib} from "../src/libraries/PoolStateLib.sol";
 import {Q64x64} from "../src/libraries/Q64x64.sol";
+import {BeliefState} from "../src/libraries/BeliefState.sol";
 
 /// The replay simulator found that on any pool deep enough to be worth correcting, the flow
 /// accumulator reaches its type bound within a few dozen blocks. That matters because a
@@ -138,6 +139,56 @@ contract SaturationTest is Test, Deployers {
         assertEq(hook.beliefOf(id), 0, "with no gain there is nothing to believe");
     }
 
+    /// The test that was supposed to prove saturation disables the gain was vacuous: the
+    /// pool saturated on its FIRST horizon step, while kappa was still zero, so
+    /// `step(0, 0, 0, vr)` returned zero for reasons unrelated to saturation. This drives
+    /// kappa positive FIRST, then saturates, which is the only ordering that tests the
+    /// remedy rather than the initial condition.
+    function test_SaturationZeroesAnAlreadyPositiveGain() public {
+        hook.allowPool(vaneKey, 1e9);
+        hook.setVarOne(vaneKey, uint64(1 << 40));
+
+        // Establish a real, non-zero gain before saturating anything.
+        uint64 seeded = uint64(uint256(hook.config().kappaMaxX64) / 2);
+        hook.setKappa(vaneKey, seeded);
+        assertEq(hook.kappaOf(id), seeded, "precondition: the pool carries a gain");
+
+        // The EWMA needs about one horizon to climb to the bound, so a single horizon
+        // step would land at the same block as saturation and miss it. Run three so a
+        // checkpoint is guaranteed to fall strictly after the flag is set.
+        for (uint256 i = 0; i < HORIZON_K * 3; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -10 ether);
+        }
+
+        assertTrue(hook.poolState(id).saturated, "precondition: the pool saturated");
+        assertEq(hook.kappaOf(id), 0, "a saturated pool must carry no gain at all");
+    }
+
+    /// And it must stay at zero, not decay toward it over thousands of blocks.
+    function test_SaturationDoesNotMerelyDecayTheGain() public {
+        hook.allowPool(vaneKey, 1e9);
+        hook.setVarOne(vaneKey, uint64(1 << 40));
+        hook.setKappa(vaneKey, uint64(uint256(hook.config().kappaMaxX64) / 2));
+
+        for (uint256 i = 0; i < HORIZON_K * 3; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -10 ether);
+        }
+        assertTrue(hook.poolState(id).saturated, "precondition");
+
+        uint256 firstStep = hook.kappaOf(id);
+
+        // Several more horizons of quiet flow.
+        for (uint256 i = 0; i < HORIZON_K * 4; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -0.001 ether);
+        }
+
+        assertEq(firstStep, 0, "the gain must be gone at the first horizon step, not decaying");
+        assertEq(hook.kappaOf(id), 0, "and must stay gone");
+    }
+
     /// Once the estimate has been corrupted the EWMA carries that level forward, so the
     /// refusal has to be sticky rather than re-evaluated from a decayed value.
     function test_SaturationDoesNotClearItself() public {
@@ -214,6 +265,55 @@ contract SaturationTest is Test, Deployers {
         vm.prank(address(0xBAD));
         vm.expectRevert();
         hook.allowPool(vaneKey, 1e15);
+    }
+
+    /// A clamped accumulator must not reach the belief or the autocovariance. It sits on
+    /// an int64 bound, so the magnitude is fabricated: fed to BeliefState.update it pins
+    /// the belief at its clamp in one step, and fed to FlowAutocovariance.update it
+    /// becomes a sample Route B carries for two further blocks.
+    function test_ClampedAccumulatorContributesNothing() public pure {
+        int256 kappa = int256(uint256(1) << 40);
+        int256 deltaMax = int256(uint256(1) << 60);
+
+        // What the fabricated magnitude would have done.
+        int256 pinned = BeliefState.update(0, kappa, int256(type(int64).max), deltaMax);
+        assertEq(pinned, deltaMax, "a clamped accumulator would pin the belief at its clamp");
+
+        // What a discarded sample does instead.
+        int256 discarded = BeliefState.update(0, kappa, 0, deltaMax);
+        assertEq(discarded, 0, "an unmeasurable block must move the belief by nothing");
+    }
+
+    /// And end to end: the pool records the saturation rather than acting on it.
+    function test_AccumulatorSaturationIsRecordedNotActedOn() public {
+        hook.allowPool(vaneKey, 1e9);
+        hook.setVarOne(vaneKey, uint64(1 << 40));
+        hook.setKappa(vaneKey, uint64(uint256(hook.config().kappaMaxX64) / 2));
+
+        for (uint256 i = 0; i < HORIZON_K * 3; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -10 ether);
+        }
+
+        assertTrue(hook.poolState(id).saturated, "saturation must be recorded");
+        assertEq(hook.kappaOf(id), 0, "and the gain withdrawn");
+
+        // A belief formed from the real flow BEFORE saturation is not discarded — it was
+        // inferred from valid measurements — but with the gain at zero nothing further can
+        // accumulate, so it may only decay from here.
+        int256 atSaturation = hook.beliefOf(id);
+        uint256 magnitudeAtSaturation = atSaturation < 0 ? uint256(-atSaturation) : uint256(atSaturation);
+
+        for (uint256 i = 0; i < HORIZON_K; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -10 ether);
+        }
+
+        int256 later = hook.beliefOf(id);
+        uint256 magnitudeLater = later < 0 ? uint256(-later) : uint256(later);
+
+        assertLt(magnitudeLater, magnitudeAtSaturation, "a saturated pool's belief may only decay");
+        assertEq(hook.kappaOf(id), 0, "and the gain must stay withdrawn");
     }
 
     /// The flag has to survive the packing it shares a slot with.

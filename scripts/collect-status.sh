@@ -20,7 +20,16 @@ SUITES=$(printf '%s' "$TEST_OUT" | grep -oE 'Ran [0-9]+ test suites' | tail -1 |
 RUNTIME=$(forge build --sizes 2>/dev/null | awk -F'|' '/VaneHook  /{gsub(/[ ,]/,"",$3); print $3; exit}')
 INVARIANTS=$(grep -h 'function invariant_' test/invariant/*.sol | wc -l | tr -d ' ')
 RUST_TESTS=$(cd sim && cargo test --release 2>/dev/null | grep -oE '[0-9]+ passed' | head -1 | grep -oE '^[0-9]+' || true)
-SLITHER=$(slither . --config-file slither.config.json 2>&1 | grep -oE '[0-9]+ result\(s\) found' | grep -oE '^[0-9]+' || true)
+# Slither runs in its own CI job and is not installed alongside Foundry, so a missing
+# binary must carry the committed value forward rather than write a null that the drift
+# check would then report as staleness.
+if command -v slither >/dev/null 2>&1; then
+  SLITHER=$(slither . --config-file slither.config.json 2>&1 | grep -oE '[0-9]+ result\(s\) found' | grep -oE '^[0-9]+' || true)
+elif [ -f "$OUT" ]; then
+  SLITHER=$(python3 -c "import json;print(json.load(open('$OUT')).get('slitherFindings',''))" 2>/dev/null || true)
+else
+  SLITHER=""
+fi
 
 # Coverage is the slow one, so it is opt-in: pass --coverage to refresh it, otherwise the
 # previous value is carried forward rather than silently zeroed.
@@ -63,9 +72,16 @@ data = {
     "worstCaseGasOverhead": num(gas),
     "gasBudget": 45000,
 }
+# A null here means a tool was absent or its output changed shape — never that the real
+# value is zero. Writing it would publish an empty figure on the site and make the CI
+# drift check report a tooling failure as staleness.
 missing = [k for k, v in data.items() if v is None]
 if missing:
-    sys.exit("refusing to write a partial status file; could not collect: " + ", ".join(missing))
+    sys.exit(
+        "refusing to write a partial status file; could not collect: "
+        + ", ".join(missing)
+        + "\nthis is a missing or changed tool, not a measurement of zero"
+    )
 with open(out, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
