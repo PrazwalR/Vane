@@ -17,3 +17,5 @@ skills-lock.json
 sim/target/
 sim/state/
 sim/results/
+lcov.info
+lcov*.info
