@@ -5,7 +5,6 @@ import {Test, console2} from "forge-std/Test.sol";
 
 import {FlowAutocovariance, FlowCovState} from "../src/libraries/FlowAutocovariance.sol";
 import {FlowVariance} from "../src/libraries/FlowVariance.sol";
-import {Q64x64} from "../src/libraries/Q64x64.sol";
 
 contract RouteBTest is Test {
     uint64 internal constant LAMBDA = uint64((uint256(999) << 32) / 1000);
@@ -32,7 +31,7 @@ contract RouteBTest is Test {
     function _run(int64[] memory series) internal pure returns (FlowCovState memory st, uint64 flowVar) {
         for (uint256 i = 0; i < series.length; i++) {
             st = FlowAutocovariance.update(st, series[i], LAMBDA);
-            flowVar = FlowVariance.updateFlowVar(flowVar, series[i], LAMBDA);
+            (flowVar,) = FlowVariance.updateFlowVarChecked(flowVar, series[i], LAMBDA);
         }
     }
 

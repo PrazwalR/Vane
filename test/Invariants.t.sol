@@ -15,7 +15,6 @@ import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
-import {VaneHook} from "../src/VaneHook.sol";
 import {VaneHookHarness} from "./utils/VaneHookHarness.sol";
 import {Fixtures} from "./utils/Fixtures.sol";
 import {OffsetDelta} from "../src/libraries/OffsetDelta.sol";

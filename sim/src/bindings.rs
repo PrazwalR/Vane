@@ -43,7 +43,7 @@ sol! {
         int24 lastTick;
         uint32 lastBlock;
         uint64 varOneX32;
-        uint64 flowVarX32;
+        uint64 flowVarUnitsSq;
         int64 deltaX64;
         bool saturated;
     }

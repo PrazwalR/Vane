@@ -6,7 +6,6 @@ import {TickMath} from "v4-core/libraries/TickMath.sol";
 
 import {DepthLib} from "../src/libraries/DepthLib.sol";
 import {KappaLib} from "../src/libraries/KappaLib.sol";
-import {Q64x64} from "../src/libraries/Q64x64.sol";
 import {VaneConfig, VaneConfigLib} from "../src/config/VaneConfig.sol";
 import {VaneParameters} from "../script/VaneParameters.sol";
 

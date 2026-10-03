@@ -13,10 +13,8 @@ import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
-import {VaneHook} from "../src/VaneHook.sol";
 import {VaneHookHarness} from "./utils/VaneHookHarness.sol";
 import {Fixtures} from "./utils/Fixtures.sol";
-import {OffsetDelta} from "../src/libraries/OffsetDelta.sol";
 
 contract SignConventionTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;

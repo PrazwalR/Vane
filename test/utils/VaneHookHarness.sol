@@ -42,7 +42,7 @@ contract VaneHookHarness is VaneHook {
     function setFlowVar(PoolKey calldata key, uint64 flowVar) external {
         PoolId id = key.toId();
         PoolState memory s = PoolStateLib.unpackState(_state[id]);
-        s.flowVarX32 = flowVar;
+        s.flowVarUnitsSq = flowVar;
         _state[id] = PoolStateLib.packState(s);
     }
 

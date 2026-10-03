@@ -176,7 +176,7 @@ contract SaturationTest is Test, Deployers {
         hook.allowPool(vaneKey, 1e15);
 
         assertFalse(hook.poolState(id).saturated, "a corrected flowUnit must clear the flag");
-        assertEq(hook.poolState(id).flowVarX32, 0, "the corrupted level must be discarded, not carried over");
+        assertEq(hook.poolState(id).flowVarUnitsSq, 0, "the corrupted level must be discarded, not carried over");
     }
 
     /// Both allowlist overloads must behave identically with respect to saturation. They
@@ -195,7 +195,7 @@ contract SaturationTest is Test, Deployers {
         hook.allowPool(vaneKey);
 
         assertFalse(hook.poolState(id).saturated, "the convenience overload must clear it too");
-        assertEq(hook.poolState(id).flowVarX32, 0, "the corrupted level must be discarded");
+        assertEq(hook.poolState(id).flowVarUnitsSq, 0, "the corrupted level must be discarded");
     }
 
     /// The convenience overload must preserve the pool's configured flow unit rather than
@@ -231,7 +231,7 @@ contract SaturationTest is Test, Deployers {
         assertEq(back.lastTick, lastTick, "tick");
         assertEq(back.lastBlock, lastBlock, "block");
         assertEq(back.varOneX32, varOne, "varOne");
-        assertEq(back.flowVarX32, flowVar, "flowVar");
+        assertEq(back.flowVarUnitsSq, flowVar, "flowVar");
         assertEq(back.deltaX64, delta, "delta");
         assertEq(back.saturated, saturated, "saturated");
     }

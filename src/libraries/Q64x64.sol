@@ -10,10 +10,6 @@ library Q64x64 {
 
     int256 internal constant TICK_LN_X64 = 1_844_582_179_799_040;
 
-    uint256 internal constant TICK_LN_SQ_X64 = 184_448_995_684;
-
-    error Q64x64__CastOverflow();
-
     function sqrt(uint256 x) internal pure returns (uint256 z) {
         if (x == 0) return 0;
         if (x < 4) return 1;
@@ -84,16 +80,6 @@ library Q64x64 {
         int256 keep = int256(lambdaX32) * oldValue;
         int256 add = int256(ONE_X32 - lambdaX32) * sample;
         return (keep + add) >> 32;
-    }
-
-    function toUint64(uint256 x) internal pure returns (uint64) {
-        if (x > type(uint64).max) revert Q64x64__CastOverflow();
-        return uint64(x);
-    }
-
-    function toInt64(int256 x) internal pure returns (int64) {
-        if (x > type(int64).max || x < type(int64).min) revert Q64x64__CastOverflow();
-        return int64(x);
     }
 
     function abs(int256 x) internal pure returns (uint256) {

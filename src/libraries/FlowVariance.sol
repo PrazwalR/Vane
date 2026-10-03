@@ -11,11 +11,6 @@ library FlowVariance {
         return signedNotional / int256(flowUnit);
     }
 
-    function accumulate(int64 accum, int256 flowUnits) internal pure returns (int64) {
-        (int64 next,) = accumulateChecked(accum, flowUnits);
-        return next;
-    }
-
     /// The clamp keeps the swap path alive, but a clamped accumulator is no longer a
     /// measurement of anything. The second return value says so, and the caller is
     /// expected to stop trusting the estimate rather than act on a saturated one.
@@ -24,11 +19,6 @@ library FlowVariance {
         if (next > type(int64).max) return (type(int64).max, true);
         if (next < type(int64).min) return (type(int64).min, true);
         return (int64(next), false);
-    }
-
-    function updateFlowVar(uint64 flowVar, int64 blockAccum, uint64 lambdaX32) internal pure returns (uint64) {
-        (uint64 next,) = updateFlowVarChecked(flowVar, blockAccum, lambdaX32);
-        return next;
     }
 
     function updateFlowVarChecked(uint64 flowVar, int64 blockAccum, uint64 lambdaX32)

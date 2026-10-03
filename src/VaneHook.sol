@@ -8,7 +8,7 @@ import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
-import {BeforeSwapDelta, toBeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
 import {CurrencySettler} from "v4-core-test/utils/CurrencySettler.sol";
@@ -57,8 +57,6 @@ contract VaneHook is IHooks, IUnlockCallback {
 
     event BeliefScaled(PoolId indexed poolId, uint256 scaleNumerator, uint256 scaleDenominator);
 
-    uint256 private constant UNIDENTIFIED_PENALTY_X32 = uint256(1 << 32) * 2;
-
     uint8 private constant FUND = 0;
     uint8 private constant WITHDRAW = 1;
 
@@ -82,6 +80,8 @@ contract VaneHook is IHooks, IUnlockCallback {
     uint128 private immutable RESERVE_TARGET_DEFAULT;
     uint64 private immutable MAX_DIVERGENCE_X32;
     uint64 private immutable ROUTE_B_Z_SCORE;
+
+    uint64 private immutable UNIDENTIFIED_PENALTY_X32;
 
     /// Route B's identification threshold. Both of its inputs are immutable, so it is a
     /// constant of the deployment — it was being recomputed, square root included, on
@@ -133,6 +133,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         RESERVE_TARGET_DEFAULT = vaneConfig.reserveTargetDefault;
         MAX_DIVERGENCE_X32 = vaneConfig.maxEstimatorDivergenceX32;
         ROUTE_B_Z_SCORE = vaneConfig.routeBZScore;
+        UNIDENTIFIED_PENALTY_X32 = vaneConfig.unidentifiedPenaltyX32;
         MIN_COV_RATIO_X32 = FlowAutocovariance.minCovRatioX32(vaneConfig.flowLambdaX32, vaneConfig.routeBZScore);
     }
 
@@ -181,7 +182,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         PoolState memory st = PoolStateLib.unpackState(_state[id]);
         if (st.saturated) {
             st.saturated = false;
-            st.flowVarX32 = 0;
+            st.flowVarUnitsSq = 0;
             _state[id] = PoolStateLib.packState(st);
             emit SaturationCleared(id, poolFlowUnit);
         }
@@ -269,7 +270,8 @@ contract VaneHook is IHooks, IUnlockCallback {
             flowUnit: FLOW_UNIT,
             reserveTargetDefault: RESERVE_TARGET_DEFAULT,
             maxEstimatorDivergenceX32: MAX_DIVERGENCE_X32,
-            routeBZScore: ROUTE_B_Z_SCORE
+            routeBZScore: ROUTE_B_Z_SCORE,
+            unidentifiedPenaltyX32: UNIDENTIFIED_PENALTY_X32
         });
     }
 
@@ -367,8 +369,8 @@ contract VaneHook is IHooks, IUnlockCallback {
 
         s.varOneX32 = HorizonVariance.updateVarOne(s.varOneX32, tickNow, s.lastTick, MAX_TICK_DELTA, VAR_LAMBDA_X32);
         (uint64 nextFlowVar, bool flowVarSaturated) =
-            FlowVariance.updateFlowVarChecked(s.flowVarX32, a.flowAccum, FLOW_LAMBDA_X32);
-        s.flowVarX32 = nextFlowVar;
+            FlowVariance.updateFlowVarChecked(s.flowVarUnitsSq, a.flowAccum, FLOW_LAMBDA_X32);
+        s.flowVarUnitsSq = nextFlowVar;
         if (flowVarSaturated) s.saturated = true;
 
         int64 blockFlow = a.flowAccum;
@@ -376,6 +378,10 @@ contract VaneHook is IHooks, IUnlockCallback {
 
         _flowCov[id] = FlowAutocovariance.update(_flowCov[id], blockFlow, FLOW_LAMBDA_X32);
 
+        // Narrowing is safe without a checked cast, and deliberately so: this runs inside
+        // afterSwap, where a revert bricks the pool permanently. The bound comes from
+        // VaneConfigLib.validate rejecting deltaMaxX64 above int64.max, and decay is
+        // contracting, so the value cannot leave the range its input already occupied.
         s.deltaX64 = int64(BeliefState.decay(s.deltaX64, THETA_X64));
         s.lastTick = tickNow;
         s.lastBlock = uint32(block.number);
@@ -407,25 +413,26 @@ contract VaneHook is IHooks, IUnlockCallback {
         a.checkpointBlock = uint32(block.number);
 
         uint256 sigmaX64 = HorizonVariance.sigmaX64(a.varKX32, horizon);
-        uint256 noiseX64 = FlowVariance.noiseScaleX64(s.flowVarX32);
+        uint256 noiseX64 = FlowVariance.noiseScaleX64(s.flowVarUnitsSq);
 
         uint256 depth = DepthLib.depthX64(_manipulationResistantLiquidity(id), sqrtPriceX96, flowUnitOf(id));
 
         uint256 openLoop = KappaLib.kappaX64(depth, sigmaX64, noiseX64, KAPPA_MAX_X64);
-        openLoop = _applyDivergenceCheck(id, s.flowVarX32, openLoop);
+        openLoop = _applyDivergenceCheck(id, s.flowVarUnitsSq, openLoop);
 
         // A saturated flow estimate is not a small noise scale, it is an unknown one, and
         // the two enter the gain identically: the clamp caps U while sigma keeps rising,
         // so lambda* is inflated and kappa turns positive for no reason the market gave.
         // Refusing to act is the only safe reading of an overflowed measurement. The flag
         // is sticky for the pool because the EWMA carries the corrupted level forward.
-        if (s.saturated || FlowVariance.isSaturated(s.flowVarX32)) {
+        if (s.saturated || FlowVariance.isSaturated(s.flowVarUnitsSq)) {
             s.saturated = true;
-            emit FlowEstimateSaturated(id, s.flowVarX32, flowUnitOf(id));
+            emit FlowEstimateSaturated(id, s.flowVarUnitsSq, flowUnitOf(id));
             openLoop = 0;
         }
 
         if (s.varOneX32 == 0) {
+            // Bounded by KAPPA_MAX_X64, which is a uint64, so this cannot truncate.
             a.kappaX64 = uint64(openLoop);
             return 0;
         }

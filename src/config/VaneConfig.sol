@@ -33,6 +33,12 @@ struct VaneConfig {
     uint64 maxEstimatorDivergenceX32;
 
     uint64 routeBZScore;
+    /// Divergence value attributed to Route B when it cannot identify a noise scale at
+    /// all, expressed in X32. Route A's gain is then scaled by
+    /// maxEstimatorDivergenceX32 / this, so a larger value distrusts an unidentifiable
+    /// cross-check more. Must exceed maxEstimatorDivergenceX32, or an unavailable
+    /// cross-check would attenuate nothing.
+    uint64 unidentifiedPenaltyX32;
 }
 
 library VaneConfigLib {
@@ -63,6 +69,8 @@ library VaneConfigLib {
     error Vane__ReserveTargetZero();
     error Vane__MaxDivergenceZero();
     error Vane__RouteBZScoreTooLow();
+
+    error Vane__UnidentifiedPenaltyTooLow();
 
     function validate(VaneConfig memory c) internal pure {
         if (c.thetaX64 == 0 || uint256(c.thetaX64) >= ONE_X64) revert Vane__ThetaOutOfRange();
@@ -102,6 +110,10 @@ library VaneConfigLib {
         if (c.maxEstimatorDivergenceX32 == 0) revert Vane__MaxDivergenceZero();
 
         if (c.routeBZScore < 2) revert Vane__RouteBZScoreTooLow();
+
+        if (c.unidentifiedPenaltyX32 <= c.maxEstimatorDivergenceX32) {
+            revert Vane__UnidentifiedPenaltyTooLow();
+        }
     }
 
     function validateFlowUnit(uint64 flowUnit) internal pure {

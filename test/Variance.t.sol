@@ -152,7 +152,7 @@ contract VarianceTest is Test {
 
         uint64 flowVar = 0;
         for (uint256 i = 0; i < 3000; i++) {
-            flowVar = FlowVariance.updateFlowVar(flowVar, flowPerBlock, LAMBDA_X32);
+            (flowVar,) = FlowVariance.updateFlowVarChecked(flowVar, flowPerBlock, LAMBDA_X32);
         }
 
         uint256 u = FlowVariance.noiseScale(flowVar);
@@ -168,7 +168,7 @@ contract VarianceTest is Test {
 
         uint64 flowVar = 0;
         for (uint256 i = 0; i < 2000; i++) {
-            flowVar = FlowVariance.updateFlowVar(flowVar, oneEtherInUnits, LAMBDA_X32);
+            (flowVar,) = FlowVariance.updateFlowVarChecked(flowVar, oneEtherInUnits, LAMBDA_X32);
         }
 
         assertLt(flowVar, type(uint64).max, "a 1 ether block must not saturate the estimator");
@@ -183,7 +183,7 @@ contract VarianceTest is Test {
         int64 hundredEther = 1e8;
         uint64 flowVar = 0;
         for (uint256 i = 0; i < 3000; i++) {
-            flowVar = FlowVariance.updateFlowVar(flowVar, hundredEther, LAMBDA_X32);
+            (flowVar,) = FlowVariance.updateFlowVarChecked(flowVar, hundredEther, LAMBDA_X32);
         }
         assertLt(flowVar, type(uint64).max, "100 ether of block flow must not saturate");
         assertApproxEqRel(FlowVariance.noiseScale(flowVar), 70_710_678, 0.01e18, "U scales linearly");
@@ -221,12 +221,12 @@ contract VarianceTest is Test {
 
     function testFuzz_Accumulate_SaturatesWithoutReverting(int64 start, int256 add) public pure {
         int256 addition = bound(add, type(int128).min, type(int128).max);
-        int64 result = FlowVariance.accumulate(start, addition);
+        (int64 result,) = FlowVariance.accumulateChecked(start, addition);
         assertTrue(result >= type(int64).min && result <= type(int64).max, "accumulator must stay in range");
     }
 
     function test_Accumulate_SaturatesAtMax() public pure {
-        int64 result = FlowVariance.accumulate(type(int64).max, 1000);
+        (int64 result,) = FlowVariance.accumulateChecked(type(int64).max, 1000);
         assertEq(result, type(int64).max, "must saturate rather than wrap");
     }
 
@@ -262,7 +262,7 @@ contract VarianceTest is Test {
     function test_Differential_NoiseScaleMatchesReference() public pure {
         uint64 flowVar = 0;
         for (uint256 i = 0; i < 3000; i++) {
-            flowVar = FlowVariance.updateFlowVar(flowVar, 1000, LAMBDA_X32);
+            (flowVar,) = FlowVariance.updateFlowVarChecked(flowVar, 1000, LAMBDA_X32);
         }
         uint256 u = FlowVariance.noiseScale(flowVar);
 
@@ -285,16 +285,16 @@ contract VarianceTest is Test {
         int24 lastTick,
         uint32 lastBlock,
         uint64 varOneX32,
-        uint64 flowVarX32,
+        uint64 flowVarUnitsSq,
         int64 deltaX64
     ) public pure {
-        PoolState memory original = PoolState(lastTick, lastBlock, varOneX32, flowVarX32, deltaX64, false);
+        PoolState memory original = PoolState(lastTick, lastBlock, varOneX32, flowVarUnitsSq, deltaX64, false);
         PoolState memory decoded = PoolStateLib.unpackState(PoolStateLib.packState(original));
 
         assertEq(decoded.lastTick, lastTick, "lastTick must survive");
         assertEq(decoded.lastBlock, lastBlock, "lastBlock must survive");
         assertEq(decoded.varOneX32, varOneX32, "varOne must survive");
-        assertEq(decoded.flowVarX32, flowVarX32, "flowVar must survive");
+        assertEq(decoded.flowVarUnitsSq, flowVarUnitsSq, "flowVar must survive");
         assertEq(decoded.deltaX64, deltaX64, "delta must survive, including the sign");
     }
 
@@ -319,10 +319,10 @@ contract VarianceTest is Test {
         int24 lastTick,
         uint32 lastBlock,
         uint64 varOneX32,
-        uint64 flowVarX32,
+        uint64 flowVarUnitsSq,
         int64 deltaX64
     ) public pure {
-        PoolState memory s = PoolState(lastTick, lastBlock, varOneX32, flowVarX32, deltaX64, false);
+        PoolState memory s = PoolState(lastTick, lastBlock, varOneX32, flowVarUnitsSq, deltaX64, false);
         bytes32 packed = PoolStateLib.packState(s);
         assertEq(uint256(packed) >> 248, 0, "top 8 bits must remain reserved and zero");
     }

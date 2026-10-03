@@ -5,7 +5,11 @@ struct PoolState {
     int24 lastTick;
     uint32 lastBlock;
     uint64 varOneX32;
-    uint64 flowVarX32;
+    /// EWMA of squared net per-block flow, in flow units squared. Deliberately NOT an
+    /// X32 quantity: unlike varOneX32 and varKX32, the sample is not shifted before the
+    /// EWMA, so this carries no fixed-point scale. It was named flowVarX32 for a while,
+    /// which made the only unit convention in the codebase lie about its own value.
+    uint64 flowVarUnitsSq;
     int64 deltaX64;
     bool saturated;
 }
@@ -38,7 +42,7 @@ library PoolStateLib {
         packed = bytes32(
             (uint256(uint24(s.lastTick)) & MASK_24) | ((uint256(s.lastBlock) & MASK_32) << OFFSET_LAST_BLOCK)
                 | ((uint256(s.varOneX32) & MASK_64) << OFFSET_VAR_ONE)
-                | ((uint256(s.flowVarX32) & MASK_64) << OFFSET_FLOW_VAR)
+                | ((uint256(s.flowVarUnitsSq) & MASK_64) << OFFSET_FLOW_VAR)
                 | ((uint256(uint64(s.deltaX64)) & MASK_64) << OFFSET_DELTA)
                 | ((s.saturated ? uint256(1) : uint256(0)) << OFFSET_SATURATED)
         );
@@ -49,7 +53,7 @@ library PoolStateLib {
         s.lastTick = int24(uint24(raw & MASK_24));
         s.lastBlock = uint32((raw >> OFFSET_LAST_BLOCK) & MASK_32);
         s.varOneX32 = uint64((raw >> OFFSET_VAR_ONE) & MASK_64);
-        s.flowVarX32 = uint64((raw >> OFFSET_FLOW_VAR) & MASK_64);
+        s.flowVarUnitsSq = uint64((raw >> OFFSET_FLOW_VAR) & MASK_64);
         s.deltaX64 = int64(uint64((raw >> OFFSET_DELTA) & MASK_64));
         s.saturated = ((raw >> OFFSET_SATURATED) & 1) == 1;
     }

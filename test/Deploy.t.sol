@@ -10,7 +10,6 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {ModifyLiquidityParams, SwapParams} from "v4-core/types/PoolOperation.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
-import {Currency} from "v4-core/types/Currency.sol";
 
 import {VaneHook} from "../src/VaneHook.sol";
 import {VaneConfig, VaneConfigLib} from "../src/config/VaneConfig.sol";

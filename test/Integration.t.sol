@@ -22,7 +22,6 @@ import {DepthLib} from "../src/libraries/DepthLib.sol";
 import {KappaLib} from "../src/libraries/KappaLib.sol";
 import {HorizonVariance} from "../src/libraries/HorizonVariance.sol";
 import {FlowVariance} from "../src/libraries/FlowVariance.sol";
-import {FlowCovState} from "../src/libraries/FlowAutocovariance.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 
@@ -165,13 +164,13 @@ contract IntegrationTest is Test, Deployers {
         (uint160 sqrtP,,,) = manager.getSlot0(id);
         uint256 depth = DepthLib.depthX64(manager.getLiquidity(id), sqrtP, 1e12);
         uint256 sigma = HorizonVariance.sigmaX64(a.varKX32, HORIZON_K);
-        uint256 noise = FlowVariance.noiseScaleX64(st.flowVarX32);
+        uint256 noise = FlowVariance.noiseScaleX64(st.flowVarUnitsSq);
 
         console2.log("liquidity        :", manager.getLiquidity(id));
         console2.log("depth   (Q64.64) :", depth);
         console2.log("varK    (Q32.32) :", a.varKX32);
         console2.log("sigma   (Q64.64) :", sigma);
-        console2.log("flowVar (raw)    :", st.flowVarX32);
+        console2.log("flowVar (raw)    :", st.flowVarUnitsSq);
         console2.log("noise U (Q64.64) :", noise);
         console2.log("lambda_amm       :", KappaLib.lambdaAmmX64(depth));
         console2.log("lambda_star      :", KappaLib.lambdaStarX64(sigma, noise));
@@ -278,7 +277,7 @@ contract IntegrationTest is Test, Deployers {
 
         vm.roll(block.number + HORIZON_K + 1);
 
-        uint64 fv = hook.poolState(id).flowVarX32;
+        uint64 fv = hook.poolState(id).flowVarUnitsSq;
         if (forceDivergence) {
             // varInformed = cov1^2/cov2 = 0.9*Var(y) => U_B = sqrt(0.1*Var(y)) against
             // Route A's sqrt(0.5*Var(y)): a 124% divergence, past the 50% bound.

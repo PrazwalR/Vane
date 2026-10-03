@@ -25,6 +25,30 @@ contract ConfigValidationTest is Test {
         return VaneParameters.config();
     }
 
+    /// An unidentifiable Route B must attenuate the gain, which it only does when the
+    /// penalty it stands in for exceeds the divergence the hook already tolerates.
+    /// Otherwise an unavailable cross-check would scale kappa by one and the guard that
+    /// exists to distrust it would be inert.
+    function test_Reverts_UnidentifiedPenaltyBelowTolerance() public {
+        VaneConfig memory c = _cfg();
+        c.unidentifiedPenaltyX32 = c.maxEstimatorDivergenceX32;
+        vm.expectRevert(VaneConfigLib.Vane__UnidentifiedPenaltyTooLow.selector);
+        harness.validate(c);
+    }
+
+    function test_Reverts_UnidentifiedPenaltyZero() public {
+        VaneConfig memory c = _cfg();
+        c.unidentifiedPenaltyX32 = 0;
+        vm.expectRevert(VaneConfigLib.Vane__UnidentifiedPenaltyTooLow.selector);
+        harness.validate(c);
+    }
+
+    function test_Accepts_UnidentifiedPenaltyJustAboveTolerance() public view {
+        VaneConfig memory c = _cfg();
+        c.unidentifiedPenaltyX32 = c.maxEstimatorDivergenceX32 + 1;
+        harness.validate(c);
+    }
+
     function test_Reverts_VarLambdaZero() public {
         VaneConfig memory c = _cfg();
         c.varLambdaX32 = 0;

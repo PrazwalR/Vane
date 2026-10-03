@@ -4,7 +4,6 @@ pragma solidity 0.8.26;
 import {Test, console2} from "forge-std/Test.sol";
 
 import {VarianceRatio, ControllerParams} from "../src/libraries/VarianceRatio.sol";
-import {Q64x64} from "../src/libraries/Q64x64.sol";
 
 contract ControllerTest is Test {
     uint256 internal constant ONE_X32 = 1 << 32;

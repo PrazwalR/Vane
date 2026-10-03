@@ -23,7 +23,8 @@ library VaneParameters {
             flowUnit: 1e12,
             reserveTargetDefault: 100e18,
             maxEstimatorDivergenceX32: uint64(ONE_X32 / 2),
-            routeBZScore: 3
+            routeBZScore: 3,
+            unidentifiedPenaltyX32: uint64(ONE_X32 * 2)
         });
     }
 }

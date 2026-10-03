@@ -6,8 +6,6 @@ import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {Q64x64} from "./Q64x64.sol";
 
 library DepthLib {
-    error DepthLib__ZeroPrice();
-
     function depthX64(uint128 liquidity, uint160 sqrtPriceX96, uint64 flowUnit) internal pure returns (uint256) {
         if (liquidity == 0 || sqrtPriceX96 == 0 || flowUnit == 0) return 0;
 

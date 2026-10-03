@@ -266,7 +266,7 @@ fn main() {
                 .and_then(|b| flowCovOfCall::abi_decode_returns(&b, false).ok());
 
             let (var1, fvar, sat) = match &st {
-                Some(r) => (r._0.varOneX32, r._0.flowVarX32, r._0.saturated),
+                Some(r) => (r._0.varOneX32, r._0.flowVarUnitsSq, r._0.saturated),
                 None => (0, 0, false),
             };
             let (cov1, cov2) = match &cv {
