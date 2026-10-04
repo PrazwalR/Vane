@@ -61,8 +61,15 @@ contract VaneInvariantsTest is StdInvariant, Test, Deployers {
         id = vaneKey.toId();
         otherId = otherKey.toId();
 
-        hook.allowPool(vaneKey);
-        hook.allowPool(otherKey);
+        // Sized to the handler's flow, not left at the default.
+        //
+        // The handler swaps up to 500,000 ether, which at the shipped flowUnit of 1e12
+        // saturates the flow-variance accumulator (its ceiling is ~4,294 ether of net
+        // per-block flow). Saturation then correctly withdraws the gain, so the campaign
+        // ran with kappa pinned at zero and proved nothing about the mechanism. This is
+        // the same sizing the replay simulator needed for the same reason.
+        hook.allowPool(vaneKey, 1e15);
+        hook.allowPool(otherKey, 1e15);
         manager.initialize(vaneKey, SQRT_PRICE_1_1);
         manager.initialize(otherKey, SQRT_PRICE_1_1);
 
@@ -74,12 +81,43 @@ contract VaneInvariantsTest is StdInvariant, Test, Deployers {
         modifyLiquidityRouter.modifyLiquidity(vaneKey, ModifyLiquidityParams(-60000, 60000, 200_000 ether, 0), "");
         modifyLiquidityRouter.modifyLiquidity(otherKey, ModifyLiquidityParams(-60000, 60000, 100_000 ether, 0), "");
 
+        // Warm the estimators before the campaign starts.
+        //
+        // Without this the campaign begins at genesis, and the handler's 64 calls spread
+        // over seven entry points land only 7-15 swaps on the pool — nowhere near the
+        // ~400 blocks of flow the estimators need before lambdaStar exceeds lambdaAmm. So
+        // kappa stayed identically zero, the belief stayed identically zero, _applyOffset
+        // returned on its first line every single time, and all seven invariants held
+        // against a contract whose offset path does nothing. Starting from a converged
+        // state is what makes them load-bearing.
+        MockERC20(Currency.unwrap(currency0)).approve(address(swapRouter), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
+        for (uint256 i = 0; i < 400; i++) {
+            vm.roll(block.number + 1);
+            _warmSwap(i % 2 == 0);
+            _warmSwap(i % 2 == 0);
+        }
+        require(hook.kappaOf(id) > 0, "warm-up must leave a live gain or the campaign proves nothing");
+
         handler = new VaneHandler(manager, hook, swapRouter, modifyLiquidityRouter, vaneKey, otherKey);
         hook.transferOwnership(address(handler));
         vm.prank(address(handler));
         hook.acceptOwnership();
 
         targetContract(address(handler));
+    }
+
+    function _warmSwap(bool zeroForOne) internal {
+        swapRouter.swap(
+            vaneKey,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -5 ether,
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
+        );
     }
 
     /// Invariant 3 in the specification, asserted on LIVE contract state rather than on a
@@ -210,6 +248,12 @@ contract VaneInvariantsTest is StdInvariant, Test, Deployers {
         if (handler.callCount() < MIN_CALLS_FOR_VACUITY_CHECK) return;
 
         assertGt(handler.swapCount(), 0, "handler must have attempted swaps");
+
+        // The campaign must have exercised the MECHANISM, not merely the swap path. Every
+        // invariant above is satisfied by a hook that never applies an offset, so without
+        // this the suite cannot distinguish VANE from an inert contract.
+        assertGt(handler.ghostMaxKappa(), 0, "the campaign must have run with a live gain");
+        assertGt(handler.ghostMaxBelief(), 0, "and must have formed a belief to act on");
 
         uint256 landed = handler.swapCount() - handler.revertCount();
         assertGt(landed, 0, "at least one swap must have executed against the hook");

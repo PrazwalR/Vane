@@ -54,6 +54,13 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
     /// Bounding by what actually executed is what gives the solvency invariant teeth.
     uint256 public ghostNotional;
 
+    /// High-water marks for the mechanism itself. Without these the suite cannot tell a
+    /// campaign that exercised VANE from one that exercised an inert contract: with kappa
+    /// at zero the belief stays at zero and _applyOffset returns on its first line, so
+    /// every invariant holds against a hook whose offset path is `return 0;`.
+    uint256 public ghostMaxKappa;
+    uint256 public ghostMaxBelief;
+
     uint256 public swapCount;
     uint256 public revertCount;
 
@@ -78,6 +85,16 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
         otherKey = _otherKey;
         currency0 = _poolKey.currency0;
         currency1 = _poolKey.currency1;
+    }
+
+    /// Called after every action that can move the mechanism.
+    function _recordMechanism() internal {
+        uint256 k = hook.kappaOf(poolKey.toId());
+        if (k > ghostMaxKappa) ghostMaxKappa = k;
+
+        int256 d = hook.beliefOf(poolKey.toId());
+        uint256 m = d < 0 ? uint256(-d) : uint256(d);
+        if (m > ghostMaxBelief) ghostMaxBelief = m;
     }
 
     function _mintAndApprove() internal {
@@ -119,6 +136,7 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
             BalanceDelta delta
         ) {
             ghostNotional += _realized(delta);
+            _recordMechanism();
         } catch {
             // A swap may legitimately fail on liquidity or price limits. What must never
             // happen is the HOOK reverting, which the invariants check separately via the
@@ -189,6 +207,7 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
             BalanceDelta delta
         ) {
             ghostNotional += _realized(delta);
+            _recordMechanism();
         } catch {}
     }
 
