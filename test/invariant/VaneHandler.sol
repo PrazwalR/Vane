@@ -10,6 +10,7 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {Currency} from "v4-core/types/Currency.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 import {PoolModifyLiquidityTest} from "v4-core/test/PoolModifyLiquidityTest.sol";
@@ -43,6 +44,15 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
     uint256 public ghostFunded1;
     uint256 public ghostWithdrawn0;
     uint256 public ghostWithdrawn1;
+
+    /// Cumulative REALIZED swap notional across both pools, taken from the returned
+    /// BalanceDelta rather than from what was requested.
+    ///
+    /// Requested size would not do. A price limit decouples the two, and the historical
+    /// phantom-notional drain paid out a percentage of the REQUEST while the realized
+    /// trade was dust — so a bound derived from requested size is one the bug satisfies.
+    /// Bounding by what actually executed is what gives the solvency invariant teeth.
+    uint256 public ghostNotional;
 
     uint256 public swapCount;
     uint256 public revertCount;
@@ -105,8 +115,11 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
             SwapParams({zeroForOne: zeroForOne, amountSpecified: amountSpecified, sqrtPriceLimitX96: limit}),
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
             ""
-        ) {}
-        catch {
+        ) returns (
+            BalanceDelta delta
+        ) {
+            ghostNotional += _realized(delta);
+        } catch {
             // A swap may legitimately fail on liquidity or price limits. What must never
             // happen is the HOOK reverting, which the invariants check separately via the
             // pool remaining usable.
@@ -172,8 +185,21 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
             }),
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
             ""
-        ) {}
-            catch {}
+        ) returns (
+            BalanceDelta delta
+        ) {
+            ghostNotional += _realized(delta);
+        } catch {}
+    }
+
+    /// The larger leg of a realized swap, which bounds whichever side an offset was
+    /// computed from.
+    function _realized(BalanceDelta delta) internal pure returns (uint256) {
+        int128 a0 = delta.amount0();
+        int128 a1 = delta.amount1();
+        uint256 m0 = uint256(uint128(a0 < 0 ? -a0 : a0));
+        uint256 m1 = uint256(uint128(a1 < 0 ? -a1 : a1));
+        return m0 > m1 ? m0 : m1;
     }
 
     function _slot0() internal view returns (uint160, int24, uint24, uint24) {

@@ -2,12 +2,14 @@
 pragma solidity 0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {Deployers} from "v4-core-test/utils/Deployers.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {Currency} from "v4-core/types/Currency.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
@@ -112,11 +114,17 @@ contract ReserveSolvencyTest is Test, Deployers {
 
         console2.log("reserve after   :", remaining);
 
-        // The payout is capped at what the hook holds, so the swap executes and the
-        // reserve is spent down to zero rather than the burn underflowing. Solvency is
-        // now structural: the hook can never owe more than it has.
-        assertLe(remaining, before, "reserve may be spent");
-        assertGe(remaining, 0, "reserve must never go negative");
+        // The docstring's actual claim: the reserve is spent DOWN TO ZERO rather than the
+        // burn underflowing. The previous assertions were `remaining <= before`, which
+        // permits the hook paying nothing at all, and `remaining >= 0` on a uint256, which
+        // no implementation could fail. Together they passed against a `_capToReserve`
+        // that returned zero unconditionally and disabled the entire payout path.
+        assertEq(remaining, 0, "a payout past the holding must spend the reserve to exactly zero");
+        assertLt(remaining, before, "and must actually have paid something");
+
+        // And the pool is still usable afterwards, which is the point of capping rather
+        // than reverting.
+        _swap(false, -1 ether);
     }
 
     function test_Reserve_LargeSwapStillExecutes() public {
@@ -163,6 +171,13 @@ contract ReserveSolvencyTest is Test, Deployers {
         assertLe(currency1.balanceOfSelf(), attackerBefore, "attacker must not profit");
     }
 
+    /// The payout must be bounded by what EXECUTED, not by what was asked for.
+    ///
+    /// This previously asserted `paid <= amount`, where `amount` is the requested size —
+    /// up to 900,000 ether — while a price limit one wei from spot means the realized
+    /// trade is dust and the correct payout is near zero. The phantom-notional bug this
+    /// test exists to guard paid roughly one percent of the REQUEST, about 9,000 ether,
+    /// which satisfied that bound comfortably. The test passed against its own bug.
     function testFuzz_Exploit_PriceLimitedSwapsNeverOverpay(uint256 rawAmount, uint8 rawLimitOffset) public {
         uint256 amount = bound(rawAmount, 1e6, 900_000 ether);
         uint160 limitOffset = uint160(bound(uint256(rawLimitOffset), 1, 255));
@@ -171,16 +186,23 @@ contract ReserveSolvencyTest is Test, Deployers {
         uint256 reserveBefore = hook.reserveOf(currency1);
         (uint160 sqrtNow,,,) = manager.getSlot0(vaneKey.toId());
 
-        swapRouter.swap(
+        BalanceDelta delta = swapRouter.swap(
             vaneKey,
             SwapParams({zeroForOne: true, amountSpecified: -int256(amount), sqrtPriceLimitX96: sqrtNow - limitOffset}),
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
             ""
         );
 
-        // Whatever the hook paid must be justified by a trade that actually executed,
-        // so it can never exceed the offset on the realized amount.
-        assertLe(reserveBefore - hook.reserveOf(currency1), amount, "payout must not exceed the trade");
+        // currency1 is the unspecified side for an exact-input zeroForOne swap, so this is
+        // the notional the offset is legitimately computed from.
+        int128 unspecified = delta.amount1();
+        uint256 realized = uint256(uint128(unspecified < 0 ? -unspecified : unspecified));
+        uint256 paid = reserveBefore - hook.reserveOf(currency1);
+
+        // At DELTA_MAX the factor is d + d^2/2 with d = 1%, so just over 1.005% of the
+        // realized amount. Two percent plus a wei of rounding is a tight ceiling that a
+        // payout sized from the request could not possibly satisfy.
+        assertLe(paid, (realized * 2) / 100 + 1, "payout must be bounded by the offset on the REALIZED trade");
     }
 
     function testFuzz_Reserve_NeverRevertsAtAnyNotional(uint256 rawAmount, bool zeroForOne) public {
@@ -202,5 +224,49 @@ contract ReserveSolvencyTest is Test, Deployers {
             console2.logBytes(reason);
             fail();
         }
+    }
+
+    /// A truncated payout is the one degradation with a funding remedy, and it was
+    /// invisible. BeliefScaled does not cover it: that fires when the reserve is below
+    /// target, whereas a payout can exceed the entire holding at ANY reserve level because
+    /// it scales with notional while the holding does not.
+    function test_PayoutTruncationIsAnnounced() public {
+        hook.setBelief(vaneKey, DELTA_MAX);
+
+        // Truncation is only reachable ABOVE target. Below it, _scaleForReserve shrinks
+        // the belief first and _clampBelief dusts it out, so _applyOffset returns before
+        // the cap is ever consulted. So: lower the target out of the way, then leave a
+        // holding far smaller than the payout a large swap will ask for.
+        hook.setReserveTarget(currency1, 1);
+        uint256 held = hook.reserveOf(currency1);
+        hook.withdrawReserve(currency1, held - 1 ether, address(this));
+        assertEq(hook.reserveOf(currency1), 1 ether, "precondition: holding above target but below the payout");
+
+        vm.recordLogs();
+        _swap(true, -50_000 ether);
+
+        bytes32 wanted = keccak256("PayoutTruncated(bytes32,address,uint256,uint256)");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool found;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == wanted) {
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "a truncated payout must be observable to an operator");
+    }
+
+    /// A pool disallowed mid-belief keeps accumulating, because _advanceBlock runs
+    /// regardless of the allowlist. Re-allowlisting must not re-arm that belief at full
+    /// size on the first swap after the hook is switched back on.
+    function test_ReallowlistingDoesNotRearmAStaleBelief() public {
+        hook.setBelief(vaneKey, DELTA_MAX);
+        assertEq(hook.beliefOf(vaneKey.toId()), DELTA_MAX, "precondition: a belief exists");
+
+        hook.disallowPool(vaneKey);
+        hook.allowPool(vaneKey);
+
+        assertEq(hook.beliefOf(vaneKey.toId()), 0, "a re-allowlisted pool must start from no belief");
     }
 }

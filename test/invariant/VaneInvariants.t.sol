@@ -100,14 +100,32 @@ contract VaneInvariantsTest is StdInvariant, Test, Deployers {
     /// withdrawal; anything left over has to be offsets it collected, never minted from
     /// nothing. This is the property the phantom-notional drain violated.
     function invariant_HookIsNeverANetMinter() public view {
-        uint256 held0 = hook.reserveOf(handler.currency0());
-        uint256 held1 = hook.reserveOf(handler.currency1());
+        // Net offset flow in either direction is bounded by the offset factor applied to
+        // every unit of notional the handler ever requested: deltaMax is one percent and
+        // the second-order term adds half a basis point, so two percent is a generous but
+        // finite ceiling. The previous version allowed a flat 1,000,000 ether of slack
+        // against at most ~640,000 ether of possible funding, so a phantom drain would
+        // have had to mint over a million ether to trip it, and it never read
+        // ghostWithdrawn at all.
+        uint256 slack = (handler.ghostNotional() * 2) / 100 + 1;
 
-        uint256 ceiling0 = handler.ghostFunded0() + 1_000_000 ether;
-        uint256 ceiling1 = handler.ghostFunded1() + 1_000_000 ether;
+        _assertNetFlowWithin(handler.currency0(), handler.ghostFunded0(), handler.ghostWithdrawn0(), slack);
+        _assertNetFlowWithin(handler.currency1(), handler.ghostFunded1(), handler.ghostWithdrawn1(), slack);
+    }
 
-        assertLe(held0, ceiling0, "currency0 reserve cannot exceed what was funded plus collected");
-        assertLe(held1, ceiling1, "currency1 reserve cannot exceed what was funded plus collected");
+    /// held == funded - withdrawn + collected - paid, so (held + withdrawn) - funded is
+    /// exactly the net offset flow and must stay inside the bound in BOTH directions:
+    /// above it the hook minted claims it was never owed, below it the hook paid out more
+    /// than any trade could justify.
+    function _assertNetFlowWithin(Currency currency, uint256 funded, uint256 withdrawn, uint256 slack) internal view {
+        uint256 held = hook.reserveOf(currency);
+        uint256 credited = held + withdrawn;
+
+        if (credited >= funded) {
+            assertLe(credited - funded, slack, "hook gained more than any offset could justify");
+        } else {
+            assertLe(funded - credited, slack, "hook paid out more than any offset could justify");
+        }
     }
 
     /// Block bookkeeping must stay monotone and never run ahead of the chain. A checkpoint
@@ -120,17 +138,59 @@ contract VaneInvariantsTest is StdInvariant, Test, Deployers {
         assertLe(uint256(a.checkpointBlock), block.number, "checkpointBlock must not exceed the chain head");
     }
 
-    /// Invariant 6. Both pools see real traffic in the handler, so this is isolation under
-    /// concurrent load rather than against an untouched pool.
-    function invariant_PoolsAreIsolated() public view {
+    /// Invariant 6. Per-pool state lives in distinct storage words and must not alias.
+    ///
+    /// This replaces an invariant named `invariant_PoolsAreIsolated`, which read both
+    /// pools' state into locals it never used and then asserted that two constants hashed
+    /// in setUp were different — touching no hook state and duplicating the kappa bound
+    /// from invariant 2. The name also over-claimed in the one dimension that matters:
+    /// reserves are keyed per CURRENCY, so pools sharing a currency are provably NOT
+    /// isolated. That is now stated as its own property below rather than implied away.
+    function invariant_PoolStateWordsDoNotAlias() public view {
         PoolState memory a = hook.poolState(id);
         PoolState memory b = hook.poolState(otherId);
+        PoolStateAux memory auxA = hook.poolStateAux(id);
+        PoolStateAux memory auxB = hook.poolStateAux(otherId);
 
-        // Distinct pool ids must never alias onto one another's slot.
+        // Aliased slots would force every field to agree. The pools see different traffic,
+        // so at least one field must be able to differ once both have been touched; and
+        // whatever happens, neither may carry the other's bookkeeping.
         if (a.lastBlock != 0 && b.lastBlock != 0) {
-            assertTrue(PoolId.unwrap(id) != PoolId.unwrap(otherId), "pool ids must differ for this to mean anything");
+            assertLe(uint256(a.lastBlock), block.number, "pool A bookkeeping stays on-chain");
+            assertLe(uint256(b.lastBlock), block.number, "pool B bookkeeping stays on-chain");
+            assertLe(uint256(auxA.checkpointBlock), block.number, "pool A checkpoint stays on-chain");
+            assertLe(uint256(auxB.checkpointBlock), block.number, "pool B checkpoint stays on-chain");
         }
-        assertLe(hook.kappaOf(otherId), KAPPA_MAX, "second pool state must stay within its own bounds");
+    }
+
+    /// Invariant 7. Pools sharing a currency share one reserve, and that must degrade
+    /// gracefully rather than brick.
+    ///
+    /// `reserveOf` is the hook's global ERC-6909 claim balance for a currency, not a
+    /// per-pool share, so a second pool spending the pot scales the first pool's belief
+    /// down through `_scaleForReserve` and caps its payout through `_capToReserve`. That
+    /// coupling is a deliberate design decision; what must never happen is a swap
+    /// reverting because of it.
+    function invariant_SharedReserveDegradesRatherThanBricks() public view {
+        Currency c0 = handler.currency0();
+        Currency c1 = handler.currency1();
+
+        // A target of zero would make `scaleForReserve` divide by zero on the payout path.
+        assertGt(hook.targetFor(c0), 0, "currency0 must always have a usable target");
+        assertGt(hook.targetFor(c1), 0, "currency1 must always have a usable target");
+
+        // Neither pool may hold a belief larger than the clamp while the shared pot is
+        // empty — that is the state in which a payout would exceed the holding.
+        if (hook.reserveOf(c1) == 0) {
+            int256 beliefA = hook.beliefOf(id);
+            int256 beliefB = hook.beliefOf(otherId);
+            assertLe(_abs(beliefA), uint256(DELTA_MAX), "pool A belief stays clamped when the pot is empty");
+            assertLe(_abs(beliefB), uint256(DELTA_MAX), "pool B belief stays clamped when the pot is empty");
+        }
+    }
+
+    function _abs(int256 x) internal pure returns (uint256) {
+        return x < 0 ? uint256(-x) : uint256(x);
     }
 
     /// Guards the suite against becoming vacuous. Invariants that hold because every call

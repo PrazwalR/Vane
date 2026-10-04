@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
 import {OffsetDelta} from "../src/libraries/OffsetDelta.sol";
+import {KappaLib} from "../src/libraries/KappaLib.sol";
 import {VaneConfig, VaneConfigLib} from "../src/config/VaneConfig.sol";
 import {VaneParameters} from "../script/VaneParameters.sol";
 
@@ -67,10 +68,18 @@ contract CastSafetyTest is Test {
     /// The gain cast is bounded by kappaMaxX64, which is itself a uint64, so the cast is
     /// width-preserving by construction. This states that rather than leaving a reader to
     /// rediscover it from the type declaration.
+    /// `kappaMaxX64 <= type(uint64).max` on a uint64 field cannot fail, so it asserted
+    /// nothing. The real property is that the cap is enforced where the cast happens:
+    /// KappaLib never returns above it, whatever its inputs.
     function test_GainCastIsWidthPreserving() public pure {
         VaneConfig memory c = VaneParameters.config();
-        assertLe(uint256(c.kappaMaxX64), uint256(type(uint64).max), "kappaMaxX64 is a uint64 by declaration");
-        assertGt(c.kappaMaxX64, 0, "and must be non-zero for the gain to exist at all");
+        assertGt(c.kappaMaxX64, 0, "the gain must be able to exist at all");
+
+        // Inputs chosen to drive lambdaStar far above lambdaAmm, so the cap is the only
+        // thing keeping the result inside a uint64.
+        uint256 unbounded =
+            KappaLib.kappaX64(uint256(1e18) << 64, (uint256(1) << 64) / 2, uint256(1) << 64, uint256(c.kappaMaxX64));
+        assertLe(unbounded, uint256(c.kappaMaxX64), "KappaLib must cap before the uint64 cast ever sees the value");
     }
 
     function validateExternally(VaneConfig memory c) external pure {

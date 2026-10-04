@@ -68,11 +68,27 @@ contract DepthAndConfigTest is Test {
         assertEq(DepthLib.depthX64(1000, 0, UNIT_FLOW), 0, "zero price gives zero depth");
     }
 
-    function testFuzz_Depth_NeverOverflows(uint128 liquidity, uint160 rawSqrtPrice) public pure {
+    /// `assertGe(d, 0)` on a uint256 cannot fail, so the test verified only that the call
+    /// returned. Depth is monotone in both of its inputs and zero exactly when either is
+    /// zero; those are properties an implementation can actually get wrong.
+    function testFuzz_Depth_IsMonotoneAndNeverOverflows(uint128 liquidity, uint160 rawSqrtPrice) public pure {
         uint160 sqrtPrice = uint160(bound(uint256(rawSqrtPrice), TickMath.MIN_SQRT_PRICE, TickMath.MAX_SQRT_PRICE));
         uint256 d = DepthLib.depthX64(liquidity, sqrtPrice, UNIT_FLOW);
 
-        assertGe(d, 0);
+        if (liquidity == 0) {
+            assertEq(d, 0, "no liquidity is no depth");
+            return;
+        }
+
+        assertEq(DepthLib.depthX64(0, sqrtPrice, UNIT_FLOW), 0, "no liquidity is no depth");
+        assertEq(DepthLib.depthX64(liquidity, 0, UNIT_FLOW), 0, "no price is no depth");
+        assertEq(DepthLib.depthX64(liquidity, sqrtPrice, 0), 0, "no flow unit is no depth");
+
+        // Monotone in liquidity: half the liquidity cannot buy more depth.
+        assertLe(DepthLib.depthX64(liquidity / 2, sqrtPrice, UNIT_FLOW), d, "depth must rise with liquidity");
+
+        // Monotone in the flow unit, inversely: a larger divisor cannot raise depth.
+        assertLe(DepthLib.depthX64(liquidity, sqrtPrice, UNIT_FLOW * 2), d, "depth must fall as flowUnit grows");
     }
 
     function test_TargetDepth_MatchesClosedForm() public pure {

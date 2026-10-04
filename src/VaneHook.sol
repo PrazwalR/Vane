@@ -36,6 +36,8 @@ contract VaneHook is IHooks, IUnlockCallback {
     error Vane__OwnerIsZero();
     error Vane__RecipientIsZero();
     error Vane__NativeValueMismatch();
+
+    error Vane__ReserveTargetOutOfRange();
     error Vane__UnexpectedNativeValue();
 
     event BeliefUpdated(PoolId indexed poolId, int256 deltaX64, uint256 kappaX64, uint256 varianceRatioX32);
@@ -54,6 +56,10 @@ contract VaneHook is IHooks, IUnlockCallback {
     event FlowEstimateSaturated(PoolId indexed id, uint64 flowVar, uint64 flowUnit);
 
     event SaturationCleared(PoolId indexed id, uint64 flowUnit);
+
+    event ReserveTargetSet(Currency indexed currency, uint256 target);
+
+    event PayoutTruncated(PoolId indexed id, Currency indexed currency, uint256 owed, uint256 available);
 
     event BeliefScaled(PoolId indexed poolId, uint256 scaleNumerator, uint256 scaleDenominator);
 
@@ -179,12 +185,18 @@ contract VaneHook is IHooks, IUnlockCallback {
         // the pool's real flow, so it is also the point at which a saturated estimate is
         // allowed to start over. Nothing else clears the flag: the gain stays off until
         // somebody fixes the cause.
+        // disallowPool stops payouts but not accumulation: _advanceBlock and _stepHorizon
+        // run regardless of the allowlist, so a belief keeps forming while the hook is
+        // meant to be switched off. Re-allowlisting would otherwise re-arm it instantly at
+        // full size, so the belief is discarded here along with any saturated estimate.
         PoolState memory st = PoolStateLib.unpackState(_state[id]);
-        if (st.saturated) {
+        bool wasSaturated = st.saturated;
+        if (wasSaturated || st.deltaX64 != 0) {
             st.saturated = false;
-            st.flowVarUnitsSq = 0;
+            st.deltaX64 = 0;
+            if (wasSaturated) st.flowVarUnitsSq = 0;
             _state[id] = PoolStateLib.packState(st);
-            emit SaturationCleared(id, poolFlowUnit);
+            if (wasSaturated) emit SaturationCleared(id, poolFlowUnit);
         }
     }
 
@@ -233,8 +245,18 @@ contract VaneHook is IHooks, IUnlockCallback {
         POOL_MANAGER.unlock(abi.encode(WITHDRAW, recipient, currency, amount));
     }
 
+    /// Sets the reserve level below which beliefs are scaled down for this currency.
+    ///
+    /// Bounded to uint128 to match the type of the configured default. The scaling in
+    /// BeliefState.scaleForReserve multiplies the belief by the reserve before dividing,
+    /// so an unbounded target admits both a checked-multiply revert inside afterSwap and,
+    /// above 2^255, an int256 cast that reinterprets the target as negative and inverts
+    /// the payout direction. Zero is rejected rather than silently meaning "use the
+    /// default", which is what targetFor would otherwise do with it.
     function setReserveTarget(Currency currency, uint256 target) external onlyOwner {
+        if (target == 0 || target > type(uint128).max) revert Vane__ReserveTargetOutOfRange();
         reserveTargetOf[currency] = target;
+        emit ReserveTargetSet(currency, target);
     }
 
     function reserveOf(Currency currency) public view returns (uint256) {
@@ -400,7 +422,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         s.lastBlock = uint32(block.number);
 
         uint256 vrX32;
-        if (uint32(block.number) - a.checkpointBlock >= HORIZON_K) {
+        if (_blocksSinceCheckpoint(a.checkpointBlock) >= HORIZON_K) {
             vrX32 = _stepHorizon(id, s, a, tickNow, sqrtPriceX96);
         }
 
@@ -417,7 +439,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         private
         returns (uint256 vrX32)
     {
-        uint256 elapsed = uint256(uint32(block.number) - a.checkpointBlock);
+        uint256 elapsed = _blocksSinceCheckpoint(a.checkpointBlock);
         uint16 horizon = elapsed > type(uint16).max ? type(uint16).max : uint16(elapsed);
 
         {
@@ -484,6 +506,20 @@ contract VaneHook is IHooks, IUnlockCallback {
                 })
             )
         );
+    }
+
+    /// Blocks elapsed since a checkpoint, tolerating the truncation to uint32.
+    ///
+    /// The checkpoint is stored as a uint32 to fit the packed word. Once block.number
+    /// passes a multiple of 2^32 the truncated value wraps below the stored checkpoint,
+    /// and a plain subtraction underflows — inside afterSwap, which bricks the pool for
+    /// every future swap, and unrecoverably, because the only writer of checkpointBlock
+    /// sits downstream of the subtraction. A wrap is reported as a full horizon so the
+    /// checkpoint re-anchors on the next swap instead.
+    function _blocksSinceCheckpoint(uint32 checkpointBlock) private view returns (uint256) {
+        uint32 nowBlock = uint32(block.number);
+        if (nowBlock >= checkpointBlock) return uint256(nowBlock - checkpointBlock);
+        return uint256(HORIZON_K);
     }
 
     function _manipulationResistantLiquidity(PoolId id) private returns (uint128) {
@@ -554,9 +590,16 @@ contract VaneHook is IHooks, IUnlockCallback {
         d = _clampBelief(d);
         if (d == 0) return 0;
 
-        int128 hookDelta = _capToReserve(
+        (int128 hookDelta, uint256 shortfall) = _capToReserve(
             _signedOffset(hookTakes, OffsetDelta.offsetAmount(_unspecifiedAmount(params, delta), d)), reserve
         );
+
+        // The only degradation with a funding remedy, and it was silent. BeliefScaled does
+        // not cover it: that fires when the reserve is below target, whereas a payout can
+        // exceed the entire holding at any reserve level because it scales with notional
+        // while the holding does not. An operator cannot top up what they cannot see.
+        if (shortfall != 0) emit PayoutTruncated(id, unspecified, shortfall + uint256(uint128(-hookDelta)), reserve);
+
         if (hookDelta == 0) return 0;
 
         _settleOrTake(unspecified, hookDelta);
@@ -585,16 +628,23 @@ contract VaneHook is IHooks, IUnlockCallback {
         return (params.zeroForOne == (params.amountSpecified < 0)) ? key.currency1 : key.currency0;
     }
 
-    /// Bounds a payout at what the hook actually holds. Both parameters were previously
-    /// named for the v4 `specified` currency, which is the opposite of what every caller
-    /// passes and of what `afterSwap` returns — the value is the UNSPECIFIED delta.
-    function _capToReserve(int128 hookDeltaUnspecified, uint256 available) private pure returns (int128) {
-        if (hookDeltaUnspecified >= 0) return hookDeltaUnspecified;
+    /// Bounds a payout at what the hook actually holds, and reports the shortfall.
+    ///
+    /// Both parameters were previously named for the v4 `specified` currency, which is the
+    /// opposite of what every caller passes and of what `afterSwap` returns — the value is
+    /// the UNSPECIFIED delta. The shortfall is returned rather than emitted here so the
+    /// arithmetic stays pure and unit-testable; the caller announces it.
+    function _capToReserve(int128 hookDeltaUnspecified, uint256 available)
+        private
+        pure
+        returns (int128 capped, uint256 shortfall)
+    {
+        if (hookDeltaUnspecified >= 0) return (hookDeltaUnspecified, 0);
 
         uint256 owed = uint256(uint128(-hookDeltaUnspecified));
-        if (owed <= available) return hookDeltaUnspecified;
+        if (owed <= available) return (hookDeltaUnspecified, 0);
 
-        return -int128(uint128(available));
+        return (-int128(uint128(available)), owed - available);
     }
 
     function _settleOrTake(Currency currency, int128 delta) private {

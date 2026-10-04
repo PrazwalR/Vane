@@ -122,4 +122,34 @@ contract AccessControlTest is Test, Deployers {
         vm.expectRevert(VaneHook.Vane__NotPoolManager.selector);
         hook.afterSwap(caller, vaneKey, _swapParams(), BalanceDeltaLibrary.ZERO_DELTA, "");
     }
+
+    /// The reserve target multiplies the belief before dividing, so an unbounded value
+    /// admits a checked-multiply revert inside afterSwap — which bricks the pool — and
+    /// above 2^255 an int256 cast that reinterprets the target as negative and inverts the
+    /// payout direction. It is bounded to uint128 to match the configured default's type.
+    function test_Revert_ReserveTargetAboveUint128() public {
+        vm.expectRevert(VaneHook.Vane__ReserveTargetOutOfRange.selector);
+        hook.setReserveTarget(currency0, uint256(type(uint128).max) + 1);
+    }
+
+    /// Zero previously meant "use the default" by way of targetFor, so an operator who
+    /// intended a zero target silently got the default instead.
+    function test_Revert_ReserveTargetZero() public {
+        vm.expectRevert(VaneHook.Vane__ReserveTargetOutOfRange.selector);
+        hook.setReserveTarget(currency0, 0);
+    }
+
+    function test_SetReserveTargetAnnouncesItself() public {
+        vm.expectEmit(true, false, false, true, address(hook));
+        emit VaneHook.ReserveTargetSet(currency0, 1234 ether);
+        hook.setReserveTarget(currency0, 1234 ether);
+
+        assertEq(hook.targetFor(currency0), 1234 ether, "the target must take effect");
+    }
+
+    function test_Revert_SetReserveTargetIsOwnerOnly() public {
+        vm.prank(address(0xBAD));
+        vm.expectRevert();
+        hook.setReserveTarget(currency0, 1 ether);
+    }
 }
