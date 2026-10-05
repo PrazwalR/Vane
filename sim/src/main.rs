@@ -81,11 +81,21 @@ fn slot0_tick(h: &mut Harness, pool_id: B256) -> i32 {
     buf[32..].copy_from_slice(&U256::from(6).to_be_bytes::<32>());
     let slot = keccak256(buf);
     let manager = h.manifest.pool_manager;
-    let out = match h.view(manager, extsloadCall { slot }.abi_encode()) {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
+    // A failed read must not be reported as tick 0. Both pools start at SQRT_PRICE_1_1,
+    // which IS tick 0, so a silent zero is indistinguishable from the expected initial
+    // state — it would inflate the informed trader's gap, trigger a maximal arbitrage
+    // from a price the pool is not quoting, and push a fabricated sample into the tick
+    // series that feeds the variance ratio. slot0 is never empty for an initialised pool,
+    // so an empty word is a wrong pool id or an unloaded dump, and every number
+    // downstream of it would be fiction.
+    let out = h
+        .view(manager, extsloadCall { slot }.abi_encode())
+        .unwrap_or_else(|e| panic!("slot0 read failed for pool {pool_id}: {e}"));
     let word = U256::from_be_slice(&out);
+    assert!(
+        word != U256::ZERO,
+        "slot0 is empty for pool {pool_id}: wrong pool id, or the state dump was not loaded"
+    );
     let raw: u32 = (word.wrapping_shr(160) & U256::from(0xFFFFFFu32)).to();
     if raw & 0x800000 != 0 {
         (raw as i32) - 0x1000000
@@ -288,6 +298,20 @@ fn main() {
 
     let vane = &pools[0];
     let plain = &pools[1];
+
+    // With no gain the hook's offset path returns on its first line, so the two pools are
+    // driven by identical flow through identical code and their arbitrage PnL must match
+    // exactly. Any divergence here would mean the reported LVR reduction is an artefact of
+    // the harness rather than a property of the mechanism — which matters, because the
+    // simulator's finding is that kappa IS zero in every realistic configuration.
+    if kappa_max.is_zero() && vane.arb_pnl != plain.arb_pnl {
+        eprintln!(
+            "WARNING: kappa stayed at zero yet the pools diverged (vane {:.6e} vs plain {:.6e}). \
+             With no gain applied these must be identical; the LVR figure below is not \
+             attributable to the mechanism.",
+            vane.arb_pnl, plain.arb_pnl
+        );
+    }
     let lvr_reduction = if plain.arb_pnl.abs() > 0.0 {
         (plain.arb_pnl - vane.arb_pnl) / plain.arb_pnl.abs() * 100.0
     } else {

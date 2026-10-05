@@ -58,8 +58,12 @@ impl Manifest {
     }
 }
 
-fn parse_u256(s: &str) -> U256 {
-    U256::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(U256::ZERO)
+/// Strict on purpose. A malformed slot silently reading as zero would make the hook
+/// behave as if uninitialised while the run still printed numbers, and the whole value of
+/// this tool is that its numbers can be trusted.
+fn parse_u256(label: &str, s: &str) -> U256 {
+    U256::from_str_radix(s.trim_start_matches("0x"), 16)
+        .unwrap_or_else(|e| panic!("malformed 256-bit value for {label}: {s:?} ({e})"))
 }
 
 pub struct Harness {
@@ -122,22 +126,26 @@ impl Harness {
         let mut db = CacheDB::new(EmptyDB::default());
         for (addr_s, acct) in raw {
             let addr: Address = addr_s.parse().expect("address");
-            let code_bytes = hex_to_bytes(&acct.code);
+            let code_bytes = hex_to_bytes(&format!("code of {addr_s}"), &acct.code);
             let bytecode = if code_bytes.is_empty() {
                 Bytecode::default()
             } else {
                 Bytecode::new_raw(code_bytes.into())
             };
             let info = AccountInfo {
-                balance: parse_u256(&acct.balance),
+                balance: parse_u256("balance", &acct.balance),
                 nonce: u64::from_str_radix(acct.nonce.trim_start_matches("0x"), 16).unwrap_or(0),
                 code_hash: bytecode.hash_slow(),
                 code: Some(bytecode),
             };
             db.insert_account_info(addr, info);
             for (k, v) in acct.storage {
-                db.insert_account_storage(addr, parse_u256(&k), parse_u256(&v))
-                    .expect("storage insert");
+                db.insert_account_storage(
+                    addr,
+                    parse_u256("storage key", &k),
+                    parse_u256("storage value", &v),
+                )
+                .expect("storage insert");
             }
         }
 
@@ -218,10 +226,105 @@ impl Harness {
     }
 }
 
-fn hex_to_bytes(s: &str) -> Vec<u8> {
+/// Strict on purpose, and the stricter of the two.
+///
+/// This previously used `filter_map(..).ok()`, which DROPPED an unparseable pair and
+/// shifted every subsequent byte of the contract's bytecode. revm accepts the result
+/// without validation, so the engine would then execute different code and report its
+/// output as VANE's — the worst failure mode available to a measuring instrument, and the
+/// one this crate's bindings module explicitly warns about one layer up. An odd-length
+/// string also panicked on the slice rather than erroring, so the behaviour was not even
+/// consistently wrong.
+fn hex_to_bytes(label: &str, s: &str) -> Vec<u8> {
     let s = s.trim_start_matches("0x");
+    assert!(
+        s.len() % 2 == 0,
+        "odd-length hex for {label}: {} characters",
+        s.len()
+    );
     (0..s.len())
         .step_by(2)
-        .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .unwrap_or_else(|e| panic!("malformed hex byte for {label} at offset {i}: {e}"))
+        })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_decoding_is_exact() {
+        assert_eq!(
+            hex_to_bytes("t", "0x60806040"),
+            vec![0x60, 0x80, 0x60, 0x40]
+        );
+        assert_eq!(hex_to_bytes("t", "60806040"), vec![0x60, 0x80, 0x60, 0x40]);
+        assert_eq!(hex_to_bytes("t", "0x"), Vec::<u8>::new());
+    }
+
+    /// The failure that mattered: a dropped pair used to shift every subsequent byte of
+    /// the contract's bytecode, so revm executed different code and the run reported its
+    /// output as VANE's.
+    #[test]
+    #[should_panic(expected = "malformed hex byte")]
+    fn hex_decoding_rejects_a_bad_pair_rather_than_dropping_it() {
+        hex_to_bytes("t", "6080zz40");
+    }
+
+    #[test]
+    #[should_panic(expected = "odd-length hex")]
+    fn hex_decoding_rejects_an_odd_length() {
+        hex_to_bytes("t", "608");
+    }
+
+    #[test]
+    fn u256_parsing_accepts_both_forms() {
+        assert_eq!(parse_u256("t", "0x10"), U256::from(16));
+        assert_eq!(parse_u256("t", "10"), U256::from(16));
+        assert_eq!(parse_u256("t", "0x0"), U256::ZERO);
+    }
+
+    /// A malformed slot reading as zero would make the hook behave as if uninitialised
+    /// while the run still printed plausible numbers.
+    #[test]
+    #[should_panic(expected = "malformed 256-bit value")]
+    fn u256_parsing_rejects_garbage_rather_than_reading_zero() {
+        parse_u256("storage value", "0xnope");
+    }
+
+    /// Error text has to name the offending account, or a corrupt dump is undiagnosable.
+    #[test]
+    fn revert_decoding_reads_a_standard_error_string() {
+        // selector 0x08c379a0, offset 0x20, length 5, "hello" padded to 32 bytes
+        let mut b = vec![0x08, 0xc3, 0x79, 0xa0];
+        b.extend_from_slice(&[0u8; 31]);
+        b.push(0x20);
+        b.extend_from_slice(&[0u8; 31]);
+        b.push(0x05);
+        b.extend_from_slice(b"hello");
+        b.extend_from_slice(&[0u8; 27]);
+
+        assert_eq!(decode_revert_string(&b).as_deref(), Some("hello"));
+        assert_eq!(decode_revert_string(&[0x08, 0xc3, 0x79, 0xa0]), None);
+        assert_eq!(decode_revert_string(&[0xde, 0xad, 0xbe, 0xef]), None);
+    }
+
+    #[test]
+    fn call_error_displays_something_actionable() {
+        assert_eq!(
+            CallError::Reverted(Bytes::new()).to_string(),
+            "reverted (no data)"
+        );
+        assert!(
+            CallError::Reverted(Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]))
+                .to_string()
+                .contains("deadbeef")
+        );
+        assert!(CallError::Halted("OutOfGas".into())
+            .to_string()
+            .contains("OutOfGas"));
+    }
 }

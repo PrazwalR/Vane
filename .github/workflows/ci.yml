@@ -45,18 +45,47 @@ jobs:
       - name: Test
         run: forge test -vv
 
-      # The invariants ranked most severe in the threat model get a deeper run than the
-      # default 256 cases: a revert in afterSwap bricks a pool permanently, so the
+      # The property tests ranked most severe in the threat model get a deeper run than
+      # the default 256 cases: a revert in afterSwap bricks a pool permanently, so the
       # no-revert property is worth the extra minute.
-      - name: Deep fuzz the critical invariants
-        run: forge test --match-test "NeverReverts|NeverOverflows|RoundTrips|Saturates"
+      - name: Deep fuzz the critical properties
+        run: forge test --match-test "NeverReverts|NeverOverflows|RoundTrips|Saturat|Monotone"
         env:
           FOUNDRY_FUZZ_RUNS: 10000
 
+      # The stateful suite needs its own step. FOUNDRY_FUZZ_RUNS does not affect invariant
+      # campaigns — FOUNDRY_INVARIANT_RUNS and _DEPTH do — and the previous deep-fuzz
+      # filter matched no invariant_ test at all, so the only tests covering interleavings
+      # never got a deep run.
+      - name: Deep run the stateful invariants
+        run: forge test --match-path "test/invariant/*"
+        env:
+          FOUNDRY_INVARIANT_RUNS: 512
+          FOUNDRY_INVARIANT_DEPTH: 128
+
+      # Scoped to src/ to match the documented figure, and gated. Without a threshold
+      # coverage could fall to zero and the job would still pass, which makes the step a
+      # report rather than a check.
       - name: Coverage
         # Gas assertions compare against measured budgets, and coverage instrumentation
         # inflates gas, so they are skipped here rather than left to fail.
-        run: forge coverage --report summary
+        run: |
+          forge coverage --report summary --no-match-coverage "(test|script)" | tee /tmp/cov.txt
+          python3 - <<'PY'
+          import re, sys
+          row = [l for l in open("/tmp/cov.txt") if l.startswith("| Total")]
+          if not row:
+              sys.exit("could not find the coverage total row")
+          pct = [float(x) for x in re.findall(r"([0-9]+\.[0-9]+)%", row[0])]
+          if len(pct) < 4:
+              sys.exit(f"unexpected coverage row shape: {row[0].strip()}")
+          lines, _stmts, branches, funcs = pct[0], pct[1], pct[2], pct[3]
+          print(f"lines {lines}%  branches {branches}%  functions {funcs}%")
+          floors = {"lines": (lines, 90.0), "branches": (branches, 80.0), "functions": (funcs, 85.0)}
+          bad = [f"{k} {v:.2f}% < {f:.0f}%" for k, (v, f) in floors.items() if v < f]
+          if bad:
+              sys.exit("coverage regressed: " + ", ".join(bad))
+          PY
         env:
           VANE_SKIP_GAS_ASSERTIONS: "true"
 
