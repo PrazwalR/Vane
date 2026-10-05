@@ -474,10 +474,24 @@ contract VaneHook is IHooks, IUnlockCallback {
         // half of it for 1,380 blocks — the same fail-open shape this guard exists to
         // close, just slower. Returning here also skips the variance-ratio step, which
         // would otherwise be computed from the saturated varK.
+        //
+        // The gate reads the CURRENT levels and is deliberately NOT sticky. The two
+        // regimes are opposites: while an update overflows, the stored value UNDERSTATES
+        // the true variance, so U is understated and lambda* overstated — the dangerous
+        // direction. Once ordinary flow resumes, that same stored value OVERSTATES the
+        // true variance, so U is overstated and lambda* understated — conservative, and
+        // safe to act on. A sticky flag therefore held the pool disabled for hundreds of
+        // blocks after its own justification had expired, and that was a denial of
+        // mechanism an attacker could simply buy: one 43,000-ether round trip costs 258
+        // ether at the 0.3% tier and switched the hook off until a human re-allowlisted
+        // the pool. Reading the live level makes recovery automatic as the corrupted
+        // sample washes out, while a genuine misconfiguration keeps re-saturating every
+        // block and so keeps the gain off until the cause is fixed.
         if (
-            s.saturated || FlowVariance.isSaturated(s.flowVarUnitsSq) || HorizonVariance.isSaturated(a.varKX32)
+            FlowVariance.isSaturated(s.flowVarUnitsSq) || HorizonVariance.isSaturated(a.varKX32)
                 || HorizonVariance.isSaturated(s.varOneX32)
         ) {
+            // Kept as a durable record for operators and indexers, never as the gate.
             s.saturated = true;
             emit FlowEstimateSaturated(id, s.flowVarUnitsSq, flowUnitOf(id));
             a.kappaX64 = 0;
