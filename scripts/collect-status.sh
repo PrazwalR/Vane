@@ -14,21 +14,34 @@ cd "$(dirname "$0")/.."
 OUT=frontend/generated/status.json
 mkdir -p "$(dirname "$OUT")"
 
+# Reads a previously recorded value. Used wherever the measuring tool is not installed in
+# the job at hand, so the figure stays accurate from the last full run instead of becoming
+# a null that the drift check would then report as staleness.
+carry_forward() {
+  [ -f "$OUT" ] || return 0
+  python3 -c "import json;print(json.load(open('$OUT')).get('$1',''))" 2>/dev/null || true
+}
+
 TEST_OUT=$(forge test 2>/dev/null | tail -3)
 TESTS=$(printf '%s' "$TEST_OUT" | grep -oE '[0-9]+ tests passed' | tail -1 | grep -oE '^[0-9]+' || true)
 SUITES=$(printf '%s' "$TEST_OUT" | grep -oE 'Ran [0-9]+ test suites' | tail -1 | grep -oE '[0-9]+' || true)
 RUNTIME=$(forge build --sizes 2>/dev/null | awk -F'|' '/VaneHook  /{gsub(/[ ,]/,"",$3); print $3; exit}')
 INVARIANTS=$(grep -h 'function invariant_' test/invariant/*.sol | wc -l | tr -d ' ')
-RUST_TESTS=$(cd sim && cargo test --release 2>/dev/null | grep -oE '[0-9]+ passed' | head -1 | grep -oE '^[0-9]+' || true)
+# Carried forward when cargo is absent, for the same reason as slither below: the
+# build-and-test job installs Foundry only, and a tool that is missing must never be
+# recorded as a measurement of zero — nor abort the drift check it exists to serve.
+if command -v cargo >/dev/null 2>&1; then
+  RUST_TESTS=$(cd sim && cargo test --release 2>/dev/null | grep -oE '[0-9]+ passed' | head -1 | grep -oE '^[0-9]+' || true)
+else
+  RUST_TESTS=$(carry_forward rustTests)
+fi
 # Slither runs in its own CI job and is not installed alongside Foundry, so a missing
 # binary must carry the committed value forward rather than write a null that the drift
 # check would then report as staleness.
 if command -v slither >/dev/null 2>&1; then
   SLITHER=$(slither . --config-file slither.config.json 2>&1 | grep -oE '[0-9]+ result\(s\) found' | grep -oE '^[0-9]+' || true)
-elif [ -f "$OUT" ]; then
-  SLITHER=$(python3 -c "import json;print(json.load(open('$OUT')).get('slitherFindings',''))" 2>/dev/null || true)
 else
-  SLITHER=""
+  SLITHER=$(carry_forward slitherFindings)
 fi
 
 # Coverage is the slow one, so it is opt-in: pass --coverage to refresh it, otherwise the
@@ -42,8 +55,8 @@ if [ "${1:-}" = "--coverage" ]; then
   LINE_COV=$(printf '%s' "$COV_ROW" | awk -F'|' '{print $3}' | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
   BRANCH_COV=$(printf '%s' "$COV_ROW" | awk -F'|' '{print $5}' | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
 elif [ -f "$OUT" ]; then
-  BRANCH_COV=$(python3 -c "import json;print(json.load(open('$OUT')).get('branchCoveragePct',''))" 2>/dev/null || true)
-  LINE_COV=$(python3 -c "import json;print(json.load(open('$OUT')).get('lineCoveragePct',''))" 2>/dev/null || true)
+  BRANCH_COV=$(carry_forward branchCoveragePct)
+  LINE_COV=$(carry_forward lineCoveragePct)
 fi
 
 # The hook's worst-case marginal cost, measured against an in-run plain-pool control so

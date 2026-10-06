@@ -238,7 +238,7 @@ impl Harness {
 fn hex_to_bytes(label: &str, s: &str) -> Vec<u8> {
     let s = s.trim_start_matches("0x");
     assert!(
-        s.len() % 2 == 0,
+        s.len().is_multiple_of(2),
         "odd-length hex for {label}: {} characters",
         s.len()
     );
