@@ -129,6 +129,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
+          # Pinning an exact version drops the components that ship with `stable`, so
+          # `cargo fmt` and `cargo clippy` are not present unless asked for by name.
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:

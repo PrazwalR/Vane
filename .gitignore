@@ -15,7 +15,8 @@ node_modules/
 .vercel/
 skills-lock.json
 sim/target/
-sim/state/
+sim/state/*
+!sim/state/.gitkeep
 sim/results/
 lcov.info
 lcov*.info
