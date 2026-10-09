@@ -2,12 +2,17 @@
   "11155111": {
     "network": "sepolia",
     "poolManager": "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",
-    "vaneHook": "0xA0480516F7D6ee73f0eF147808259F952780b044",
-    "token0": "0x13bcc0C980C1b1056cAD075310e10D2601B9B129",
-    "token1": "0x308d0a4d5421468941Fc7d58AdB5c9Ef8C695A38",
-    "poolId": "0x8923ada723ec7e7716911a02c95bbd3004495c8b5e547fe6e373091080d3ce5b",
+    "vaneHook": "0x0D732da8A64A1C71d8a4d4559cA699e077957044",
+    "token0": "0x3354b1BE73b18A599c5C6c1219dcbd7cfA7445fd",
+    "token1": "0x6b939D48C262242CB8C3F590AD60cE0714BDA1bB",
+    "swapRouter": "0x9440Aa7325Ae748C23bDEcAF24862811ffbfA2b5",
+    "liquidityRouter": "0x678762FeDA237a6C306dd5D2c778f43D9d3E024C",
+    "poolId": "0xca1d4ad11cc84a7d426871b60b291dcd7540a01038e2b3f1e7eff13dc45cdc71",
     "hookFlags": 12356,
     "fee": 3000,
-    "tickSpacing": 60
+    "tickSpacing": 60,
+    "flowUnit": "1000000000000",
+    "liquidity": "50000000000000000000000",
+    "reserve": "5000000000000000000000"
   }
 }
