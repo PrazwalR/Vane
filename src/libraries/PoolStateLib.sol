@@ -12,6 +12,12 @@ struct PoolState {
     uint64 flowVarUnitsSq;
     int64 deltaX64;
     bool saturated;
+    /// Sticky record that this pool has seen a swap whose notional was too small to
+    /// register as even one flow unit. The mirror image of `saturated`: that flag means
+    /// the flow estimate overflowed, this one means it underflowed. Both make the estimate
+    /// untrustworthy, but only this one is otherwise completely invisible — the gain simply
+    /// stays at zero and nothing says why.
+    bool flowUnmeasurable;
 }
 
 struct PoolStateAux {
@@ -32,6 +38,7 @@ library PoolStateLib {
     uint256 private constant OFFSET_FLOW_VAR = 120;
     uint256 private constant OFFSET_DELTA = 184;
     uint256 private constant OFFSET_SATURATED = 248;
+    uint256 private constant OFFSET_FLOW_UNMEASURABLE = 249;
 
     uint256 private constant OFFSET_CHECKPOINT_BLOCK = 24;
     uint256 private constant OFFSET_VAR_K = 56;
@@ -45,6 +52,7 @@ library PoolStateLib {
                 | ((uint256(s.flowVarUnitsSq) & MASK_64) << OFFSET_FLOW_VAR)
                 | ((uint256(uint64(s.deltaX64)) & MASK_64) << OFFSET_DELTA)
                 | ((s.saturated ? uint256(1) : uint256(0)) << OFFSET_SATURATED)
+                | ((s.flowUnmeasurable ? uint256(1) : uint256(0)) << OFFSET_FLOW_UNMEASURABLE)
         );
     }
 
@@ -56,6 +64,7 @@ library PoolStateLib {
         s.flowVarUnitsSq = uint64((raw >> OFFSET_FLOW_VAR) & MASK_64);
         s.deltaX64 = int64(uint64((raw >> OFFSET_DELTA) & MASK_64));
         s.saturated = ((raw >> OFFSET_SATURATED) & 1) == 1;
+        s.flowUnmeasurable = ((raw >> OFFSET_FLOW_UNMEASURABLE) & 1) == 1;
     }
 
     function packAux(PoolStateAux memory a) internal pure returns (bytes32 packed) {

@@ -1,0 +1,17 @@
+VANE end-to-end test battery — 2026-10-10T19:40:01Z
+commit 33a2302e4ba78fd7193a3d253b6f148e36e4b8f5
+
+=== 1. full suite ===
+Ran 24 test suites in 4.95s (18.78s CPU time): 231 tests passed, 0 failed, 0 skipped (231 total tests)
+
+=== 2. deep fuzz, 50,000 runs on the property tests ===
+Ran 13 test suites in 97.06s (168.35s CPU time): 35 tests passed, 0 failed, 0 skipped (35 total tests)
+
+=== 3. deep stateful invariants, 1024 runs x 256 depth ===
+[PASS] invariant_BeliefRespectsItsClamp() (runs: 1024, calls: 262144, reverts: 0)
+[PASS] invariant_BlockBookkeepingIsSane() (runs: 1024, calls: 262144, reverts: 0)
+[PASS] invariant_HookIsNeverANetMinter() (runs: 1024, calls: 262144, reverts: 0)
+[PASS] invariant_KappaRespectsItsCap() (runs: 1024, calls: 262144, reverts: 0)
+[PASS] invariant_PoolRemainsSwappable() (runs: 1024, calls: 262144, reverts: 0)
+[PASS] invariant_PoolStateWordsDoNotAlias() (runs: 1024, calls: 262144, reverts: 0)
+[PASS] invariant_SharedReserveDegradesRatherThanBricks() (runs: 1024, calls: 262144, reverts: 0)

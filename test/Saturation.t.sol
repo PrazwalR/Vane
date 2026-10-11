@@ -323,9 +323,10 @@ contract SaturationTest is Test, Deployers {
         uint64 varOne,
         uint64 flowVar,
         int64 delta,
-        bool saturated
+        bool saturated,
+        bool flowUnmeasurable
     ) public pure {
-        PoolState memory original = PoolState(lastTick, lastBlock, varOne, flowVar, delta, saturated);
+        PoolState memory original = PoolState(lastTick, lastBlock, varOne, flowVar, delta, saturated, flowUnmeasurable);
         PoolState memory back = PoolStateLib.unpackState(PoolStateLib.packState(original));
 
         assertEq(back.lastTick, lastTick, "tick");
@@ -334,6 +335,7 @@ contract SaturationTest is Test, Deployers {
         assertEq(back.flowVarUnitsSq, flowVar, "flowVar");
         assertEq(back.deltaX64, delta, "delta");
         assertEq(back.saturated, saturated, "saturated");
+        assertEq(back.flowUnmeasurable, flowUnmeasurable, "flowUnmeasurable");
     }
 
     /// The bound in wei, stated as a test so it cannot drift silently. A pool whose net

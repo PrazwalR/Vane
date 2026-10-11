@@ -4,6 +4,10 @@ pragma solidity 0.8.26;
 import {Q64x64} from "./Q64x64.sol";
 
 library FlowVariance {
+    uint64 internal constant MIN_FLOW_UNIT = 1e9;
+
+    uint64 internal constant MAX_FLOW_UNIT = 1e18;
+
     error FlowVariance__ZeroFlowUnit();
 
     function toFlowUnits(int256 signedNotional, uint256 flowUnit) internal pure returns (int256) {
@@ -37,6 +41,29 @@ library FlowVariance {
 
     function isSaturated(uint64 flowVar) internal pure returns (bool) {
         return flowVar == type(uint64).max;
+    }
+
+    /// A flow unit sized to a currency's decimals, for an operator choosing one.
+    ///
+    /// `flowUnit` is wei per flow unit, so its correct magnitude depends entirely on the
+    /// currency's decimals — and nothing in the contract knows them. At the shipped
+    /// default of 1e12 a six-decimal quote token like USDC needs a swap of one million
+    /// tokens before `toFlowUnits` returns anything but zero, which leaves the estimator
+    /// permanently at zero and the gain permanently off.
+    ///
+    /// This returns one ten-thousandth of a whole token, clamped into the validated range:
+    /// small enough that ordinary swaps register, large enough that the squared
+    /// accumulator has room before it saturates. It is a starting point for calibration,
+    /// not a substitute for it.
+    function recommendedFlowUnit(uint8 currencyDecimals) internal pure returns (uint64) {
+        if (currencyDecimals > 36) return MAX_FLOW_UNIT;
+
+        uint256 unit = 10 ** uint256(currencyDecimals);
+        unit = unit / 10_000;
+
+        if (unit < MIN_FLOW_UNIT) return MIN_FLOW_UNIT;
+        if (unit > MAX_FLOW_UNIT) return MAX_FLOW_UNIT;
+        return uint64(unit);
     }
 
     function noiseScale(uint64 flowVar) internal pure returns (uint256) {

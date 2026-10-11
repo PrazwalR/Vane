@@ -69,7 +69,8 @@ contract ConfigRoundTripTest is Test, Deployers {
             varOneX32: type(uint64).max,
             flowVarUnitsSq: type(uint64).max,
             deltaX64: type(int64).max,
-            saturated: true
+            saturated: true,
+            flowUnmeasurable: true
         });
         PoolState memory sBack = PoolStateLib.unpackState(PoolStateLib.packState(s));
         assertEq(sBack.lastTick, s.lastTick, "lastTick");
@@ -78,6 +79,7 @@ contract ConfigRoundTripTest is Test, Deployers {
         assertEq(sBack.flowVarUnitsSq, s.flowVarUnitsSq, "flowVarUnitsSq");
         assertEq(sBack.deltaX64, s.deltaX64, "deltaX64");
         assertEq(sBack.saturated, s.saturated, "saturated");
+        assertEq(sBack.flowUnmeasurable, s.flowUnmeasurable, "flowUnmeasurable");
 
         PoolStateAux memory a = PoolStateAux({
             checkpointTick: type(int24).min,

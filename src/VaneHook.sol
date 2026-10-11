@@ -57,6 +57,12 @@ contract VaneHook is IHooks, IUnlockCallback {
 
     event SaturationCleared(PoolId indexed id, uint64 flowUnit);
 
+    /// A swap moved real notional that measured as zero flow. Emitted once per pool, on
+    /// the transition, because the condition is persistent rather than per-swap: it means
+    /// `flowUnit` is too large for this currency's decimals and the gain cannot turn on
+    /// until an operator re-allowlists the pool with a smaller one.
+    event FlowUnmeasurable(PoolId indexed id, uint256 notional, uint64 flowUnit);
+
     event ReserveTargetSet(Currency indexed currency, uint256 target);
 
     event PayoutTruncated(PoolId indexed id, Currency indexed currency, uint256 owed, uint256 available);
@@ -191,8 +197,12 @@ contract VaneHook is IHooks, IUnlockCallback {
         // full size, so the belief is discarded here along with any saturated estimate.
         PoolState memory st = PoolStateLib.unpackState(_state[id]);
         bool wasSaturated = st.saturated;
-        if (wasSaturated || st.deltaX64 != 0) {
+        if (wasSaturated || st.deltaX64 != 0 || st.flowUnmeasurable) {
             st.saturated = false;
+            // Cleared because re-allowlisting is how an operator corrects the flow unit
+            // that caused it; if the new one is still too large it will be set again on
+            // the next swap.
+            st.flowUnmeasurable = false;
             st.deltaX64 = 0;
             if (wasSaturated) st.flowVarUnitsSq = 0;
             _state[id] = PoolStateLib.packState(st);
@@ -370,8 +380,25 @@ contract VaneHook is IHooks, IUnlockCallback {
         {
             int256 magnitude1 = int256(Q64x64.abs(int256(delta.amount1())));
             int256 signedNotional = params.zeroForOne ? -magnitude1 : magnitude1;
-            (int64 nextAccum, bool accumSaturated) =
-                FlowVariance.accumulateChecked(a.flowAccum, FlowVariance.toFlowUnits(signedNotional, flowUnitOf(id)));
+            uint64 unit = flowUnitOf(id);
+            int256 flowUnits = FlowVariance.toFlowUnits(signedNotional, unit);
+
+            // The mirror image of saturation, and the only failure mode in this contract
+            // that was entirely silent. `flowUnit` is wei per flow unit, so its correct
+            // magnitude depends on the currency's decimals — which nothing here knows. At
+            // the shipped default of 1e12 a six-decimal quote token needs a swap of a
+            // million tokens before this division returns anything but zero, so the flow
+            // variance stays at zero, the noise scale stays at zero, lambda* stays at zero
+            // and the gain never turns on. Nothing reverted, nothing was clamped, and no
+            // event fired: the mechanism simply did nothing, for a reason no observer
+            // could see. Recording it does not change the arithmetic, it makes the
+            // condition diagnosable.
+            if (flowUnits == 0 && magnitude1 != 0 && !s.flowUnmeasurable) {
+                s.flowUnmeasurable = true;
+                emit FlowUnmeasurable(id, uint256(magnitude1), unit);
+            }
+
+            (int64 nextAccum, bool accumSaturated) = FlowVariance.accumulateChecked(a.flowAccum, flowUnits);
             a.flowAccum = nextAccum;
             if (accumSaturated) s.saturated = true;
         }
