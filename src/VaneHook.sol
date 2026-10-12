@@ -221,7 +221,20 @@ contract VaneHook is IHooks, IUnlockCallback {
         return unit == 0 ? FLOW_UNIT : unit;
     }
 
-    function fundReserve(Currency currency, uint256 amount) external payable {
+    /// Collateralises the hook so it can pay out beliefs. Operator-only, deliberately.
+    ///
+    /// This was permissionless, which made the reserve a trap for anyone but the owner.
+    /// `withdrawReserve` is owner-only, takes an arbitrary amount and an arbitrary
+    /// recipient, and there is no per-funder ledger anywhere — `reserveOf` is one pooled
+    /// number per currency. So a third party who collateralised the hook had no claim on
+    /// what they put in and no way to take it back: their capital was a donation, and
+    /// nothing in the interface said so.
+    ///
+    /// Restricting funding to the owner makes the trust model match the withdrawal
+    /// semantics that already existed: the reserve is operator capital. Supporting genuine
+    /// third-party funding would need a per-funder ledger and a pro-rata withdrawal path,
+    /// which is a feature rather than a fix, and is not what this function was.
+    function fundReserve(Currency currency, uint256 amount) external payable onlyOwner {
         if (CurrencyLibrary.isAddressZero(currency)) {
             if (msg.value != amount) revert Vane__NativeValueMismatch();
         } else if (msg.value != 0) {
