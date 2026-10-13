@@ -115,7 +115,15 @@ contract SignConventionTest is Test, Deployers {
 
         uint256 benefit = uint256(v1 - p1);
         console2.log("extra numeraire paid to seller", benefit);
-        assertApproxEqRel(benefit, 0.01 ether, 0.02e18, "offset must be ~1% of notional");
+
+        // The belief was set to 100bps, but the PAYING side is bounded by the pool's own
+        // fee — 3000, i.e. 30bps here — so the benefit tracks the fee rather than
+        // deltaMax. That bound is what stops the favourable leg being priced better than
+        // the market: at best it now breaks even against it, so there is no edge for an
+        // arbitrageur to take out of the reserve.
+        uint256 feeFraction = (1 ether * uint256(vaneKey.fee)) / 1_000_000;
+        assertApproxEqRel(benefit, feeFraction, 0.02e18, "payout must be bounded by the pool fee, not deltaMax");
+        assertLt(benefit, 0.01 ether, "and must be strictly below the 100bps belief it was set from");
     }
 
     function test_Sign_OffsetIsSignedNotAFee() public {

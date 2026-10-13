@@ -38,6 +38,12 @@ contract VaneHook is IHooks, IUnlockCallback {
     error Vane__NativeValueMismatch();
 
     error Vane__ReserveTargetOutOfRange();
+
+    /// v4 expresses swap fees in hundredths of a basis point, so this is the denominator
+    /// that turns a PoolKey fee into a fraction of price.
+    uint256 private constant FEE_DENOMINATOR = 1_000_000;
+
+    uint256 private constant ONE_X64_U = uint256(1) << 64;
     error Vane__UnexpectedNativeValue();
 
     event BeliefUpdated(PoolId indexed poolId, int256 deltaX64, uint256 kappaX64, uint256 varianceRatioX32);
@@ -641,7 +647,7 @@ contract VaneHook is IHooks, IUnlockCallback {
             d = _scaleForReserve(id, d, unspecified, reserve);
         }
 
-        d = _clampBelief(d);
+        d = _clampBelief(d, key.fee, hookTakes);
         if (d == 0) return 0;
 
         (int128 hookDelta, uint256 shortfall) = _capToReserve(
@@ -660,8 +666,33 @@ contract VaneHook is IHooks, IUnlockCallback {
         return hookDelta;
     }
 
-    function _clampBelief(int256 d) private view returns (int256) {
+    /// Clamps the belief, and on the paying side clamps it by the pool's own fee.
+    ///
+    /// `deltaMaxX64` is a single global parameter and was the only bound here, so nothing
+    /// tied the size of the correction to the pool it was applied to. On any pool whose
+    /// fee is below deltaMax that opens an edge: the favourable leg is priced better than
+    /// the curve by delta while costing only the fee, so a trader nets delta - fee against
+    /// the true market and the hook pays the difference out of its reserve. At the shipped
+    /// deltaMax of 1% against a 5bp pool that is 0.95% of notional, and a single
+    /// well-sized trade realises it — measured at 7.53 ether on 1,000 of notional.
+    ///
+    /// Repeating it is self-defeating, because curve slippage overtakes the edge within a
+    /// few trades, so this was never unbounded draining. But one profitable bite per
+    /// belief is still the protocol paying an arbitrageur out of reserve for nothing.
+    ///
+    /// Bounding the paying side by the fee removes the edge rather than capping it: the
+    /// best the favourable leg can do is break even against the market. The taking side is
+    /// left on deltaMax alone, because there the hook collects and a trader paying more
+    /// than the fee is the correction working as intended.
+    function _clampBelief(int256 d, uint24 fee, bool hookTakes) private view returns (int256) {
         int256 cap = int256(uint256(DELTA_MAX_X64));
+
+        if (!hookTakes) {
+            // v4 fees are hundredths of a basis point, so a fee of `f` is f/1e6 of price.
+            int256 feeCap = (int256(uint256(fee)) * int256(uint256(ONE_X64_U))) / int256(FEE_DENOMINATOR);
+            if (feeCap < cap) cap = feeCap;
+        }
+
         if (d > cap) d = cap;
         if (d < -cap) d = -cap;
         return Q64x64.abs(d) < uint256(DELTA_DUST_X64) ? int256(0) : d;

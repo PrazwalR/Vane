@@ -20,3 +20,4 @@ sim/state/*
 sim/results/
 lcov.info
 lcov*.info
+audits/
