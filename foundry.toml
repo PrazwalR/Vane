@@ -17,6 +17,15 @@ tab_width = 4
 bracket_spacing = false
 int_types = "long"
 
+# Fuzz inputs are seeded randomly by default, which makes per-test gas non-reproducible:
+# the gas a fuzz test consumes depends on the values drawn. `forge snapshot --check` then
+# compares numbers that legitimately differ between runs, so the gas gate failed on its
+# own noise rather than on a regression — a median swinging 747,505 to 852,071 on one
+# integration fuzz test. Pinning the seed makes both the gas snapshot and any fuzz failure
+# reproducible. Change it deliberately to explore a different input space.
+[fuzz]
+seed = "0x5641_4e45"
+
 [invariant]
 runs = 128
 depth = 64
