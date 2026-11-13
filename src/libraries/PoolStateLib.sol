@@ -56,6 +56,12 @@ library PoolStateLib {
         );
     }
 
+    /// The block a pool last rolled into, read without unpacking the rest of the word.
+    /// beforeSwap runs on every swap and needs only this field to decide whether to roll.
+    function lastBlockOf(bytes32 packed) internal pure returns (uint32) {
+        return uint32((uint256(packed) >> OFFSET_LAST_BLOCK) & MASK_32);
+    }
+
     function unpackState(bytes32 packed) internal pure returns (PoolState memory s) {
         uint256 raw = uint256(packed);
         s.lastTick = int24(uint24(raw & MASK_24));

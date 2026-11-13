@@ -30,7 +30,7 @@ contract OrganicBeliefTest is Test, Deployers {
         deployMintAndApprove2Currencies();
 
         uint160 flags = uint160(
-            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
                 | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         address hookAddr = address(flags ^ (0xBBBB << 144));
@@ -58,16 +58,23 @@ contract OrganicBeliefTest is Test, Deployers {
         hook.fundReserve(currency1, 1000 ether);
     }
 
-    /// Drives the estimators to a converged state using only real swaps. Two
-    /// same-direction swaps per block make the price trend within the block; the
-    /// direction flips between blocks so the price wanders instead of running away.
-    /// A pure per-block alternation would return the price to its start every time,
-    /// leaving Var(r_k) at zero and kappa correctly at zero.
+    /// Drives the estimators to a converged state using only real swaps, in the one regime
+    /// where Kyle matching says the pool under-reacts: a price that trends. Flow runs one
+    /// way for a full horizon of blocks, then reverses, so the price wanders instead of
+    /// running away while every horizon carries momentum.
+    ///
+    /// This used to flip direction every block, two swaps per block. That only produced a
+    /// gain because the first swap of each block was counted in the PREVIOUS block's flow
+    /// sample: each window held one swap each way, the flow it measured nearly cancelled,
+    /// and the estimator read near-zero noise against real volatility. With the windows
+    /// aligned to blocks, flow that fully explains its own price move gives a gain of
+    /// exactly zero — the closed-form result in SIMULATOR-FINDINGS — so that warm-up now
+    /// correctly produces nothing.
     function _warmEstimators() internal {
         for (uint256 i = 0; i < 400; i++) {
             vm.roll(block.number + 1);
-            _swap(i % 2 == 0, -5 ether);
-            _swap(i % 2 == 0, -5 ether);
+            _swap((i / HORIZON_K) % 2 == 0, -5 ether);
+            _swap((i / HORIZON_K) % 2 == 0, -5 ether);
         }
     }
 

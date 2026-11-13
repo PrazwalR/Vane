@@ -43,7 +43,7 @@ contract SaturationDoSTest is Test, Deployers {
         deployMintAndApprove2Currencies();
 
         uint160 flags = uint160(
-            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
                 | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         address hookAddr = address(flags ^ (0xD05D << 144));
@@ -94,12 +94,23 @@ contract SaturationDoSTest is Test, Deployers {
         );
     }
 
+    /// Honest flow that the mechanism has something to say about: it trends for a full
+    /// horizon, then reverses. Sized so a block moves this deep pool by whole ticks.
+    ///
+    /// Two-sided flow that flips every block used to be enough. It only ever produced a
+    /// gain because the first swap of each block was counted in the previous block's
+    /// sample, so the measured flow cancelled while the price still moved. With windows
+    /// aligned to blocks it correctly produces none.
+    function _honestBlock(uint256 i) internal {
+        vm.roll(block.number + 1);
+        _swapAs(address(this), (i / 20) % 2 == 0, -100 ether);
+        _swapAs(address(this), (i / 20) % 2 == 0, -100 ether);
+    }
+
     /// Bring the mechanism to life from flow alone, so the attack has something to destroy.
     function _warm() internal {
         for (uint256 i = 0; i < 400; i++) {
-            vm.roll(block.number + 1);
-            _swapAs(address(this), i % 2 == 0, -5 ether);
-            _swapAs(address(this), i % 2 == 0, -5 ether);
+            _honestBlock(i);
         }
     }
 
@@ -130,8 +141,7 @@ contract SaturationDoSTest is Test, Deployers {
 
         // Let a horizon pass so the remedy runs.
         for (uint256 i = 0; i < 25; i++) {
-            vm.roll(block.number + 1);
-            _swapAs(address(this), i % 2 == 0, -5 ether);
+            _honestBlock(i);
         }
 
         console2.log("saturation recorded     :", hook.poolState(id).saturated);
@@ -160,9 +170,7 @@ contract SaturationDoSTest is Test, Deployers {
 
         uint256 blocksToRecover = type(uint256).max;
         for (uint256 i = 0; i < 1200; i++) {
-            vm.roll(block.number + 1);
-            _swapAs(address(this), i % 2 == 0, -5 ether);
-            _swapAs(address(this), i % 2 == 0, -5 ether);
+            _honestBlock(i);
             if (hook.kappaOf(id) > 0) {
                 blocksToRecover = i + 1;
                 break;
@@ -186,9 +194,7 @@ contract SaturationDoSTest is Test, Deployers {
 
         // A long stretch of ordinary two-sided flow, far more than the EWMA needs to decay.
         for (uint256 i = 0; i < 600; i++) {
-            vm.roll(block.number + 1);
-            _swapAs(address(this), i % 2 == 0, -5 ether);
-            _swapAs(address(this), i % 2 == 0, -5 ether);
+            _honestBlock(i);
         }
 
         assertGt(hook.kappaOf(id), 0, "honest flow alone must bring the gain back");
@@ -227,9 +233,7 @@ contract SaturationDoSTest is Test, Deployers {
         // sample. That cost is the attacker's leverage, so the number is worth recording.
         uint256 blocksToRecover = type(uint256).max;
         for (uint256 i = 0; i < 800; i++) {
-            vm.roll(block.number + 1);
-            _swapAs(address(this), i % 2 == 0, -5 ether);
-            _swapAs(address(this), i % 2 == 0, -5 ether);
+            _honestBlock(i);
             if (hook.kappaOf(id) > 0) {
                 blocksToRecover = i + 1;
                 break;

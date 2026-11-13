@@ -48,17 +48,57 @@ correction endogenously from order flow, because that is what Kyle's model *is*:
 extracting the informed signal from aggregate flow when the true value is unobservable.
 
 **Signed, not a fee.** When `delta > 0` the buyer pays more *and the seller receives
-more*. Both sides trade at a shifted price. A fee is unsigned and cannot do this.
-Measured against an identical plain pool: a buyer forgoes 0.0100 per unit notional, a
-seller gains 0.0100. This is a quote, not a toll.
+more*. Both sides trade at a shifted price, which a fee, being unsigned, cannot do. The side
+the hook pays is bounded by the pool's own fee, so the favourable leg can at best break even
+against the market; the side it collects on is bounded only by `deltaMax`.
 
-**Self-limiting.** Flow against the belief is paid out, but that same flow drives `delta`
-toward zero, so the exposure extinguishes itself. A round trip through the belief loses
-money for the trader.
+**Every trade pays for the belief it moves.** The belief moves with flow, so a swap is
+priced at the *average* belief across its own walk rather than at the belief it found. What
+the hook collects and pays is then the change in a potential, `G(x1) - G(x0)` with `G` the
+antiderivative of the clamped belief, and it telescopes: a sequence of trades that returns
+the belief to where it started nets to zero, however it is split. The only way to be paid
+is to walk back a belief somebody else paid to build. This holds against a trader who also
+supplies the pool's liquidity in the same transaction and so gets the fee back, which is the
+case that defeated every fee-based argument.
+
+## Settlement, and the attacks that shaped it
+
+The 2026-10-11 audit produced two reproductions that took value out of the reserve in one
+transaction. Both are now regression tests (`test/AtomicHarvest.t.sol`) with their
+assertions inverted.
+
+- **The free first leg.** The belief used to move only at block boundaries, and a block's
+  first swap was priced before it moved. So that swap created a belief at no cost, and the
+  same actor traded back against it before the block ended, with JIT liquidity returning the
+  fee. With no manual state at all, 400 blocks of real flow and one transaction paid the
+  attacker 141 ether. Pricing each swap along its own walk closes it: the same transaction
+  now loses the attacker 175.
+- **The conversion leak.** Flow is measured in currency1, so a currency0 offset has to be
+  converted. At the swap's own execution rate, that is a price the trader sets: push the
+  pool up with your own liquidity, buy into the belief so the hook collects currency0 while
+  it is expensive, sell back for currency1, and put the price back. A fuzz campaign driven
+  at that shape found single transactions paying the attacker 35 ether. Currency0 offsets
+  are now converted at the price the block *opened* at, bounded against the execution rate
+  in the hook's favour. To read that price before anything in the block can move it, the
+  block rollover runs in `beforeSwap`, which also aligns every measurement window with a
+  block.
+
+Three smaller holes went with them. A belief that outlives a falling gain is revised down
+in proportion, because what walks it back is the gain: at a gain of zero it would never
+shrink and could be sold into indefinitely. Swaps below one flow unit move the belief by
+nothing, so they are now priced at nothing rather than at their notional. And the dust
+threshold applies only to payouts, since a symmetric one was a free band worth
+`dust^2 / (2 kappa)` a loop.
+
+The residual is the one any spot-anchored design has: a party that controls the last
+transaction of one block and the first of the next can choose the opening price. That
+needs the manipulated price to survive a block boundary rather than a single transaction.
 
 ## Estimating the inputs on chain
 
-Everything is computed inside the hook in integer arithmetic, within a 45,000 gas budget.
+Everything is computed inside the hook in integer arithmetic. Ordinary swaps cost the hook
+9,700 gas (no belief) to 22,300 (active belief), against a 45,000 budget; the once-per-horizon
+checkpoint with an active belief is the recorded exception, at 76,200.
 
 **Ticks are log prices.** `ln P = tick * ln(1.0001)`, so a tick difference *is* a log
 return up to a constant. Every variance estimate is integer arithmetic — no `ln`, no
@@ -92,9 +132,9 @@ model-free: it needs only the definition of an efficient price.
 M0 through M5 are implemented and tested: the signed offset and its v4 accounting, both
 variance estimators, depth and open-loop `kappa`, the leaky variance-ratio controller,
 the Route B divergence check, the reserve and its graceful degradation, and a validated
-deploy path. 212 Solidity tests plus 8 covering the replay engine, including fuzz,
-stateful invariants and threat-model regressions. 87.6% branch coverage; slither reports
-nothing.
+deploy path. 262 Solidity tests plus 15 covering the replay engine, including fuzz,
+stateful invariants, threat-model regressions and the audit's reproductions; slither
+reports nothing.
 
 **M6 exists, and its result is negative.** The Rust replay simulator in `sim/` executes
 the compiled hook inside `revm` against Kyle-model order flow. It found that under
@@ -111,15 +151,36 @@ depth, with measured `D/D*` in [0.50, 0.71].
 
 The same algebra names the escape: over `k` blocks a trending price gives
 `sigma_k = sigma_1 * sqrt(k * VR)` while `U_k = U_1 * sqrt(k)`, so a correction exists
-only where **VR > 4**. Tested by making the fundamental trend, the gain turns on between
-VR = 3.78 and VR = 4.27 — where the algebra puts it. Even past activation the belief peaks
-at about 0.53x its own `deltaDust` threshold, so no offset is applied and the reserve does
-not move.
+only where **VR > 4**. Tested by making the fundamental trend, the gain turns on where the
+algebra puts it: zero at VR(5) = 3.08, live at 3.79.
 
-Open rather than settled, therefore: whether to promote Route B from an attenuator to the
-primary noise estimator, or to make `VR > 4` an explicit precondition and scope the claim
-to pools that genuinely trend. The decay rate `theta` and horizon `K` remain uncalibrated
-because no regime yet produces a payout to calibrate against. Every parameter shipped in
+**And past activation it now acts.** Until the settlement rework the belief peaked at about
+half of its own dust threshold, so no offset was ever applied and the reserve never moved.
+With collections no longer gated by dust and every swap paying for its own walk, the
+trending replays show the first effect, 400 blocks against an identical plain pool:
+
+| momentum | VR(5) | gain | arbitrage profit vs plain | reserve |
+|---:|---:|---|---:|---:|
+| 0.0  | 1.06 | zero | unchanged | 0 |
+| 0.8  | 3.08 | zero | unchanged | 0 |
+| 0.9  | 3.79 | live | **-0.13%** | **+0.09 ETH** |
+| 0.95 | 4.20 | live | **-0.51%** | **+0.81 ETH** |
+
+Arbitrage profit marked at the fundamental is LVR, so this is LVR falling, paid for by the
+flow that trends the price and not by the reserve. It is one seed and a small number, and it
+is the mechanism doing what it says rather than a calibration of how much.
+
+A note on the test suite, because it changed what "organic" means here. The tests used to
+warm the estimators with flow that flips direction every block, and that produced a gain
+only because a block's first swap was counted in the previous block's sample: each window
+held one swap each way, the measured flow cancelled, and the estimator read near-zero noise
+against real volatility. Aligning the windows with blocks removed that artifact, which was
+also a way to inflate the gain on purpose, and the warm-ups now trend.
+
+Open, therefore: whether to promote Route B from an attenuator to the primary noise
+estimator, or to make `VR > 4` an explicit precondition and scope the claim to pools that
+genuinely trend. The decay rate `theta` and horizon `K` are still uncalibrated, but there is
+now a regime that produces a payout to calibrate them against. Every parameter shipped in
 `script/VaneParameters.sol` is a documented placeholder, not a default.
 
 ## Layout
@@ -154,7 +215,7 @@ forge build
 forge test
 ```
 
-Deployment mines an address carrying exactly four permission flags, because v4 reads a
+Deployment mines an address carrying exactly five permission flags, because v4 reads a
 hook's permissions from the low 14 bits of its own address:
 
 ```

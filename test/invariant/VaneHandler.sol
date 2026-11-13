@@ -12,6 +12,8 @@ import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol
 import {Currency} from "v4-core/types/Currency.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {FullMath} from "v4-core/libraries/FullMath.sol";
+import {FixedPoint96} from "v4-core/libraries/FixedPoint96.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 import {PoolModifyLiquidityTest} from "v4-core/test/PoolModifyLiquidityTest.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
@@ -53,6 +55,16 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
     /// trade was dust — so a bound derived from requested size is one the bug satisfies.
     /// Bounding by what actually executed is what gives the solvency invariant teeth.
     uint256 public ghostNotional;
+
+    /// The same, per currency, in the units the hook sizes each currency's offsets in.
+    ///
+    /// Currency1 offsets are sized from currency1 flow, so its notional is the currency1
+    /// leg. Currency0 offsets are converted from that flow at the price the BLOCK opened at,
+    /// not the swap's own rate, so a block that moves the price a long way can size a
+    /// currency0 offset well beyond the swap's currency0 leg. Its notional is therefore the
+    /// larger of that leg and the currency1 leg converted at the block's opening price.
+    uint256 public ghostNotional0;
+    uint256 public ghostNotional1;
 
     /// High-water marks for the mechanism itself. Without these the suite cannot tell a
     /// campaign that exercised VANE from one that exercised an inert contract: with kappa
@@ -136,6 +148,7 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
             BalanceDelta delta
         ) {
             ghostNotional += _realized(delta);
+            _recordNotional(poolKey, delta);
             _recordMechanism();
         } catch {
             // A swap may legitimately fail on liquidity or price limits. What must never
@@ -207,8 +220,22 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
             BalanceDelta delta
         ) {
             ghostNotional += _realized(delta);
+            _recordNotional(otherKey, delta);
             _recordMechanism();
         } catch {}
+    }
+
+    function _recordNotional(PoolKey memory key, BalanceDelta delta) internal {
+        int128 a0 = delta.amount0();
+        int128 a1 = delta.amount1();
+        uint256 m0 = uint256(uint128(a0 < 0 ? -a0 : a0));
+        uint256 m1 = uint256(uint128(a1 < 0 ? -a1 : a1));
+
+        uint160 sqrtOpen = TickMath.getSqrtPriceAtTick(hook.poolState(key.toId()).lastTick);
+        uint256 m1In0 = FullMath.mulDiv(FullMath.mulDiv(m1, FixedPoint96.Q96, sqrtOpen), FixedPoint96.Q96, sqrtOpen);
+
+        ghostNotional0 += m0 > m1In0 ? m0 : m1In0;
+        ghostNotional1 += m1;
     }
 
     /// The larger leg of a realized swap, which bounds whichever side an offset was

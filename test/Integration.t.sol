@@ -41,7 +41,7 @@ contract IntegrationTest is Test, Deployers {
         deployMintAndApprove2Currencies();
 
         uint160 flags = uint160(
-            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
                 | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         address hookAddr = address(flags ^ (0x8888 << 144));
@@ -114,13 +114,20 @@ contract IntegrationTest is Test, Deployers {
         assertLt(a.flowAccum, 0, "flow must accumulate for a sell");
 
         uint32 blockBefore = s.lastBlock;
+        int64 threeSwaps = a.flowAccum;
         vm.roll(block.number + 1);
         _swap(true, -1 ether);
 
         s = hook.poolState(id);
         assertGt(s.lastBlock, blockBefore, "block boundary must advance the sample");
         assertGt(s.varOneX32, 0, "variance must update on the first swap of a new block");
-        assertEq(hook.poolStateAux(id).flowAccum, 0, "accumulator must reset after sampling");
+
+        // The block rolls in beforeSwap, before the new block's first swap executes, so the
+        // accumulator now holds that one swap and nothing of the previous block. It used to
+        // roll afterwards, which folded this swap into the previous block's sample.
+        int64 oneSwap = hook.poolStateAux(id).flowAccum;
+        assertLt(oneSwap, 0, "the new block's own swap is in its own window");
+        assertGt(oneSwap, threeSwaps / 2, "and the previous block's flow is not");
     }
 
     function _makeDeep() internal {
@@ -133,8 +140,8 @@ contract IntegrationTest is Test, Deployers {
 
         for (uint256 i = 0; i < 400; i++) {
             vm.roll(block.number + 1);
-            _swap(i % 2 == 0, -5 ether);
-            _swap(i % 2 == 0, -5 ether);
+            _swap((i / 20) % 2 == 0, -5 ether);
+            _swap((i / 20) % 2 == 0, -5 ether);
         }
 
         PoolStateAux memory a = hook.poolStateAux(id);
@@ -154,8 +161,8 @@ contract IntegrationTest is Test, Deployers {
 
         for (uint256 i = 0; i < 400; i++) {
             vm.roll(block.number + 1);
-            _swap(i % 2 == 0, -5 ether);
-            _swap(i % 2 == 0, -5 ether);
+            _swap((i / 20) % 2 == 0, -5 ether);
+            _swap((i / 20) % 2 == 0, -5 ether);
         }
 
         PoolState memory st = hook.poolState(id);
@@ -271,8 +278,8 @@ contract IntegrationTest is Test, Deployers {
         _makeDeep();
         for (uint256 i = 0; i < 400; i++) {
             vm.roll(block.number + 1);
-            _swap(i % 2 == 0, -5 ether);
-            _swap(i % 2 == 0, -5 ether);
+            _swap((i / 20) % 2 == 0, -5 ether);
+            _swap((i / 20) % 2 == 0, -5 ether);
         }
 
         vm.roll(block.number + HORIZON_K + 1);
@@ -475,8 +482,14 @@ contract IntegrationTest is Test, Deployers {
         console2.log("vane pool, checkpoint + active belief:", vaneGas);
         console2.log("marginal hook cost:", vaneGas - plainGas);
 
+        // Raised from 73,600 (measured 73,362) to 76,500 (measured 76,172) by moving the
+        // block rollover into beforeSwap. That is a second hook call on every swap, about
+        // 3,000 gas, and on this path a second unpack and repack of both state words. It
+        // buys the one price a transaction cannot move — where the block opened — which
+        // currency0 offsets are converted at; without it a single transaction could take
+        // 35 ether out of the reserve. See AtomicHarvest.t.sol.
         if (GasGuard.assertionsEnabled()) {
-            assertLt(vaneGas - plainGas, 73_600, "worst case must stay within its recorded bound");
+            assertLt(vaneGas - plainGas, 76_500, "worst case must stay within its recorded bound");
         }
     }
 

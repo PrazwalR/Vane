@@ -43,7 +43,7 @@ contract SaturationTest is Test, Deployers {
         deployMintAndApprove2Currencies();
 
         uint160 flags = uint160(
-            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
                 | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         address hookAddr = address(flags ^ (0xA7A7 << 144));
@@ -298,21 +298,20 @@ contract SaturationTest is Test, Deployers {
         assertTrue(hook.poolState(id).saturated, "saturation must be recorded");
         assertEq(hook.kappaOf(id), 0, "and the gain withdrawn");
 
-        // A belief formed from the real flow BEFORE saturation is not discarded — it was
-        // inferred from valid measurements — but with the gain at zero nothing further can
-        // accumulate, so it may only decay from here.
-        int256 atSaturation = hook.beliefOf(id);
-        uint256 magnitudeAtSaturation = atSaturation < 0 ? uint256(-atSaturation) : uint256(atSaturation);
+        // Withdrawing the gain withdraws the belief with it. This test used to require the
+        // opposite — that a belief formed before saturation survive and only decay — and
+        // that was the hole the audit's Undamped reproduction used. At a gain of zero the
+        // belief no longer moves with flow, so a trader selling into it is paid at the same
+        // level on every unit for as long as the reserve lasts: measured at 0.75 ether on
+        // 250 of one-way notional, before a JIT position hands back the fee.
+        assertEq(hook.beliefOf(id), 0, "a belief cannot outlive the gain that walks it back");
 
         for (uint256 i = 0; i < HORIZON_K; i++) {
             vm.roll(block.number + 1);
             _swap(i % 2 == 0, -10 ether);
         }
 
-        int256 later = hook.beliefOf(id);
-        uint256 magnitudeLater = later < 0 ? uint256(-later) : uint256(later);
-
-        assertLt(magnitudeLater, magnitudeAtSaturation, "a saturated pool's belief may only decay");
+        assertEq(hook.beliefOf(id), 0, "and nothing can rebuild it while the gain is off");
         assertEq(hook.kappaOf(id), 0, "and the gain must stay withdrawn");
     }
 

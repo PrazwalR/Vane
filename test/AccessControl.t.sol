@@ -26,7 +26,7 @@ contract AccessControlTest is Test, Deployers {
         deployMintAndApprove2Currencies();
 
         uint160 flags = uint160(
-            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
                 | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         address hookAddr = address(flags ^ (0xAAAA << 144));
@@ -45,11 +45,19 @@ contract AccessControlTest is Test, Deployers {
         return SwapParams({zeroForOne: true, amountSpecified: -1 ether, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
     }
 
-    function test_BeforeSwapIsAnUngatedNoOp() public {
-        // beforeSwap carries no permission flag and returns a zero delta. It is
-        // deliberately callable by anyone because it reads and writes nothing: the
-        // offset moved to afterSwap, where the realized amount is known.
+    /// beforeSwap rolls the pool into a new block, which writes the estimators, the
+    /// committed belief and the reference price. It used to be an ungated no-op; anyone able
+    /// to call it now could roll a block on their own schedule.
+    function test_Revert_BeforeSwapFromNonManager() public {
         vm.prank(ATTACKER);
+        vm.expectRevert(VaneHook.Vane__NotPoolManager.selector);
+        hook.beforeSwap(ATTACKER, vaneKey, _swapParams(), "");
+    }
+
+    /// It still never alters the swap itself.
+    function test_BeforeSwapReturnsNoDeltaAndNoFee() public {
+        vm.roll(block.number + 1);
+        vm.prank(address(manager));
         (bytes4 selector, BeforeSwapDelta d, uint24 fee) = hook.beforeSwap(ATTACKER, vaneKey, _swapParams(), "");
         assertEq(selector, IHooks.beforeSwap.selector, "selector");
         assertEq(BeforeSwapDelta.unwrap(d), 0, "must return a zero delta");

@@ -42,12 +42,18 @@ contract VaneInvariantsTest is StdInvariant, Test, Deployers {
     uint256 internal constant DELTA_MAX = uint256(1 << 64) / 100;
     uint256 internal constant KAPPA_MAX = uint256(1 << 64) / 1000;
 
+    /// What the hook already held when the campaign began. The warm-up's flow is not in the
+    /// handler's notional, so anything the hook collected during it has to be treated as
+    /// starting balance rather than as something the campaign must justify.
+    uint256 internal warmedReserve0;
+    uint256 internal warmedReserve1;
+
     function setUp() public {
         deployFreshManagerAndRouters();
         deployMintAndApprove2Currencies();
 
         uint160 flags = uint160(
-            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
                 | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         address hookAddr = address(flags ^ (0xCCCC << 144));
@@ -94,10 +100,12 @@ contract VaneInvariantsTest is StdInvariant, Test, Deployers {
         MockERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
         for (uint256 i = 0; i < 400; i++) {
             vm.roll(block.number + 1);
-            _warmSwap(i % 2 == 0);
-            _warmSwap(i % 2 == 0);
+            _warmSwap((i / 20) % 2 == 0);
+            _warmSwap((i / 20) % 2 == 0);
         }
         require(hook.kappaOf(id) > 0, "warm-up must leave a live gain or the campaign proves nothing");
+        warmedReserve0 = hook.reserveOf(currency0);
+        warmedReserve1 = hook.reserveOf(currency1);
 
         handler = new VaneHandler(manager, hook, swapRouter, modifyLiquidityRouter, vaneKey, otherKey);
         hook.transferOwnership(address(handler));
@@ -145,10 +153,18 @@ contract VaneInvariantsTest is StdInvariant, Test, Deployers {
         // against at most ~640,000 ether of possible funding, so a phantom drain would
         // have had to mint over a million ether to trip it, and it never read
         // ghostWithdrawn at all.
-        uint256 slack = (handler.ghostNotional() * 2) / 100 + 1;
+        //
+        // The bound is per currency, because the offsets are: see ghostNotional0 in the
+        // handler for why a currency0 offset can exceed the swap's own currency0 leg.
+        uint256 slack0 = (handler.ghostNotional0() * 2) / 100 + 1;
+        uint256 slack1 = (handler.ghostNotional1() * 2) / 100 + 1;
 
-        _assertNetFlowWithin(handler.currency0(), handler.ghostFunded0(), handler.ghostWithdrawn0(), slack);
-        _assertNetFlowWithin(handler.currency1(), handler.ghostFunded1(), handler.ghostWithdrawn1(), slack);
+        _assertNetFlowWithin(
+            handler.currency0(), handler.ghostFunded0() + warmedReserve0, handler.ghostWithdrawn0(), slack0
+        );
+        _assertNetFlowWithin(
+            handler.currency1(), handler.ghostFunded1() + warmedReserve1, handler.ghostWithdrawn1(), slack1
+        );
     }
 
     /// held == funded - withdrawn + collected - paid, so (held + withdrawn) - funded is

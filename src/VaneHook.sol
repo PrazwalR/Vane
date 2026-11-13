@@ -10,6 +10,11 @@ import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
+import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {FullMath} from "v4-core/libraries/FullMath.sol";
+import {FixedPoint96} from "v4-core/libraries/FixedPoint96.sol";
 import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
 import {CurrencySettler} from "v4-core-test/utils/CurrencySettler.sol";
 
@@ -38,6 +43,11 @@ contract VaneHook is IHooks, IUnlockCallback {
     error Vane__NativeValueMismatch();
 
     error Vane__ReserveTargetOutOfRange();
+
+    /// The payout bound and the payout haircut are both priced from `key.fee`. For a
+    /// dynamic-fee pool that field is a flag, not a fee — 0x800000, read as 838% — while
+    /// the fee actually charged is whatever was last set, and this hook never sets one.
+    error Vane__DynamicFeeUnsupported();
 
     /// v4 expresses swap fees in hundredths of a basis point, so this is the denominator
     /// that turns a PoolKey fee into a fraction of price.
@@ -132,6 +142,31 @@ contract VaneHook is IHooks, IUnlockCallback {
         VaneConfigLib.validate(vaneConfig);
         if (owner_ == address(0)) revert Vane__OwnerIsZero();
 
+        // v4 decides which callbacks to make from the low bits of this contract's address,
+        // and nothing else checks them. Deployed at an address without BEFORE_SWAP, the
+        // block rollover would simply never run: no estimate, no gain, no belief, and the
+        // conversion reference frozen at the pool's initial tick. That is a silent failure
+        // on the scale of the whole mechanism, so a mis-mined address must not deploy.
+        Hooks.validateHookPermissions(
+            IHooks(address(this)),
+            Hooks.Permissions({
+                beforeInitialize: true,
+                afterInitialize: true,
+                beforeAddLiquidity: false,
+                afterAddLiquidity: false,
+                beforeRemoveLiquidity: false,
+                afterRemoveLiquidity: false,
+                beforeSwap: true,
+                afterSwap: true,
+                beforeDonate: false,
+                afterDonate: false,
+                beforeSwapReturnDelta: false,
+                afterSwapReturnDelta: true,
+                afterAddLiquidityReturnDelta: false,
+                afterRemoveLiquidityReturnDelta: false
+            })
+        );
+
         POOL_MANAGER = manager;
         owner = owner_;
         emit OwnershipTransferred(address(0), owner_);
@@ -213,6 +248,19 @@ contract VaneHook is IHooks, IUnlockCallback {
             if (wasSaturated) st.flowVarUnitsSq = 0;
             _state[id] = PoolStateLib.packState(st);
             if (wasSaturated) emit SaturationCleared(id, poolFlowUnit);
+        }
+
+        // The belief a swap is priced at is the stored belief PLUS the gain times the flow
+        // accumulated so far this block, so zeroing the stored belief alone does not
+        // re-arm the pool from nothing. Flow pushed while the pool was disallowed costs
+        // nothing, because a disallowed pool prices no offset; left in the accumulator it
+        // would still be paid out to whoever reverses it after this call lands. That is a
+        // sandwich on the operator's own transaction. The price is one partial per-block
+        // flow sample, once per allowlisting.
+        PoolStateAux memory ax = PoolStateLib.unpackAux(_aux[id]);
+        if (ax.flowAccum != 0) {
+            ax.flowAccum = 0;
+            _aux[id] = PoolStateLib.packAux(ax);
         }
     }
 
@@ -346,6 +394,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         returns (bytes4)
     {
         if (!allowlisted[key.toId()]) revert Vane__PoolNotAllowlisted();
+        if (LPFeeLibrary.isDynamicFee(key.fee)) revert Vane__DynamicFeeUnsupported();
         return IHooks.beforeInitialize.selector;
     }
 
@@ -370,12 +419,33 @@ contract VaneHook is IHooks, IUnlockCallback {
         return IHooks.afterInitialize.selector;
     }
 
-    function beforeSwap(address, PoolKey calldata, SwapParams calldata, bytes calldata)
+    /// Rolls the pool into a new block before the block's first swap executes.
+    ///
+    /// The rollover used to run in afterSwap, after the block's first swap had already
+    /// moved the price. That had two costs. The first swap's flow was folded into the
+    /// PREVIOUS block's sample, so the measurement windows straddled blocks. And the only
+    /// price the hook could record as "where this block started" was one that the block's
+    /// own first swap had chosen — which is to say, one the first trader in a block could
+    /// set to anything, trade against, and then put back, all in one transaction.
+    ///
+    /// Running here, the tick read is the price the previous block ended at. Nothing in the
+    /// current block can move it, and it is what currency0 offsets are converted at for the
+    /// rest of the block. See `_offsetAmount`.
+    function beforeSwap(address, PoolKey calldata key, SwapParams calldata, bytes calldata)
         external
-        pure
         override
+        onlyPoolManager
         returns (bytes4, BeforeSwapDelta, uint24)
     {
+        PoolId id = key.toId();
+        bytes32 word = _state[id];
+        if (uint32(block.number) != PoolStateLib.lastBlockOf(word)) {
+            PoolState memory s = PoolStateLib.unpackState(word);
+            PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id]);
+            _advanceBlock(id, s, a);
+            _state[id] = PoolStateLib.packState(s);
+            _aux[id] = PoolStateLib.packAux(a);
+        }
         return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
@@ -388,6 +458,15 @@ contract VaneHook is IHooks, IUnlockCallback {
         return (IHooks.afterSwap.selector, _recordSwap(key, params, delta));
     }
 
+    /// One swap's walk of the belief: the unclamped belief before and after its own flow,
+    /// that flow in wei of currency1, and the tick the block opened at.
+    struct Walk {
+        int256 x0;
+        int256 x1;
+        uint256 walkedWei;
+        int24 refTick;
+    }
+
     function _recordSwap(PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
         private
         returns (int128 hookDeltaUnspecified)
@@ -396,10 +475,11 @@ contract VaneHook is IHooks, IUnlockCallback {
         PoolState memory s = PoolStateLib.unpackState(_state[id]);
         PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id]);
 
+        uint64 unit = flowUnitOf(id);
+        int64 accumBefore = a.flowAccum;
         {
             int256 magnitude1 = int256(Q64x64.abs(int256(delta.amount1())));
             int256 signedNotional = params.zeroForOne ? -magnitude1 : magnitude1;
-            uint64 unit = flowUnitOf(id);
             int256 flowUnits = FlowVariance.toFlowUnits(signedNotional, unit);
 
             // The mirror image of saturation, and the only failure mode in this contract
@@ -422,10 +502,31 @@ contract VaneHook is IHooks, IUnlockCallback {
             if (accumSaturated) s.saturated = true;
         }
 
-        hookDeltaUnspecified = _applyOffset(id, key, params, delta, s, a);
-
-        if (uint32(block.number) != s.lastBlock) {
-            _advanceBlock(id, s, a);
+        // With no belief and no gain the walk is identically zero and there is nothing to
+        // price. That is the state almost every pool is in — the replay simulator finds the
+        // gain at zero outside strongly trending regimes — so it skips the walk entirely.
+        if (s.deltaX64 != 0 || a.kappaX64 != 0) {
+            // The belief before and after this swap's own flow. The swap is priced along
+            // that segment rather than at the stored belief, so it pays for the belief it
+            // creates and is paid only for belief it removes. The walked flow is read back
+            // from the accumulator rather than taken from `flowUnits`, so that a clamped
+            // accumulator prices exactly the segment the belief actually moved along.
+            //
+            // Unchecked because every term is bounded by its storage type: kappa is a
+            // uint64 and the accumulator an int64, so each product is below 2^127, the
+            // belief adds at most 2^63, and the walked flow times a uint64 unit is below
+            // 2^129.
+            Walk memory w;
+            unchecked {
+                int256 kappa = int256(uint256(a.kappaX64));
+                w.x0 = int256(s.deltaX64) + kappa * int256(accumBefore);
+                w.x1 = int256(s.deltaX64) + kappa * int256(a.flowAccum);
+                w.walkedWei = Q64x64.abs(int256(a.flowAccum) - int256(accumBefore)) * uint256(unit);
+            }
+            // beforeSwap has already rolled the block, so this is the tick the previous
+            // block ended at, fixed for every swap in this one.
+            w.refTick = s.lastTick;
+            hookDeltaUnspecified = _applyOffset(id, key, params, delta, w);
         }
 
         _state[id] = PoolStateLib.packState(s);
@@ -449,9 +550,12 @@ contract VaneHook is IHooks, IUnlockCallback {
         // consumers below would otherwise treat the fabricated magnitude as real: it pins
         // the belief straight to its clamp through BeliefState.update, and it writes a
         // fictitious sample into the autocovariance that Route B then carries for two more
-        // blocks. A flow we could not measure contributes nothing instead.
+        // blocks. A flow we could not measure contributes nothing to the estimate, and the
+        // belief it walked is discarded rather than kept: zero is the only value whose
+        // liability cannot exceed what the window's swaps were priced at.
         int64 blockFlow = a.flowAccum;
-        if (blockFlow == type(int64).max || blockFlow == type(int64).min) {
+        bool fabricated = blockFlow == type(int64).max || blockFlow == type(int64).min;
+        if (fabricated) {
             s.saturated = true;
             blockFlow = 0;
         }
@@ -459,24 +563,40 @@ contract VaneHook is IHooks, IUnlockCallback {
 
         _flowCov[id] = FlowAutocovariance.update(_flowCov[id], blockFlow, FLOW_LAMBDA_X32);
 
+        // Commit the belief the window's swaps walked to, at the gain they were priced at,
+        // and only then decay it. The order matters for the liability: decaying first and
+        // adding the flow after can leave a belief LARGER in magnitude than the one the
+        // last swap was priced at — a belief at +1% walked back to zero by sellers would
+        // be committed at -0.05% — which is liability nobody paid for. Decaying the walked
+        // value can only shrink it.
+        //
         // Narrowing is safe without a checked cast, and deliberately so: this runs inside
         // afterSwap, where a revert bricks the pool permanently. The bound comes from
-        // VaneConfigLib.validate rejecting deltaMaxX64 above int64.max, and decay is
-        // contracting, so the value cannot leave the range its input already occupied.
-        s.deltaX64 = int64(BeliefState.decay(s.deltaX64, THETA_X64));
+        // VaneConfigLib.validate rejecting deltaMaxX64 above int64.max, update clamps to
+        // it, and decay is contracting.
+        s.deltaX64 = fabricated
+            ? int64(0)
+            : int64(
+                BeliefState.decay(
+                    BeliefState.update(
+                        s.deltaX64, int256(uint256(a.kappaX64)), int256(blockFlow), int256(uint256(DELTA_MAX_X64))
+                    ),
+                    THETA_X64
+                )
+            );
         s.lastTick = tickNow;
         s.lastBlock = uint32(block.number);
 
         uint256 vrX32;
         if (_blocksSinceCheckpoint(a.checkpointBlock) >= HORIZON_K) {
+            uint64 kappaBefore = a.kappaX64;
             vrX32 = _stepHorizon(id, s, a, tickNow, sqrtPriceX96);
+            // A gain that falls must take the belief down with it, or the belief stops
+            // walking back as fast as it was built and the reserve owes the difference.
+            // At a gain of zero — which the saturation gate installs on purpose — it
+            // stops walking back at all. `revise` never widens, so the cast is safe.
+            s.deltaX64 = int64(BeliefState.revise(s.deltaX64, a.kappaX64, kappaBefore));
         }
-
-        s.deltaX64 = int64(
-            BeliefState.update(
-                s.deltaX64, int256(uint256(a.kappaX64)), int256(blockFlow), int256(uint256(DELTA_MAX_X64))
-            )
-        );
 
         emit BeliefUpdated(id, s.deltaX64, a.kappaX64, vrX32);
     }
@@ -619,15 +739,40 @@ contract VaneHook is IHooks, IUnlockCallback {
         return BeliefState.scaleForReserve(d, reserve, target);
     }
 
+    /// Prices one swap against the belief and settles the offset with the pool manager.
+    ///
+    /// `w.x0` and `w.x1` are the unclamped belief before and after this swap's own flow,
+    /// and `w.walkedWei` is that flow in wei of currency1. Three things keep a closed loop
+    /// of swaps from being paid out of the reserve, and each closes a route the audit used:
+    ///
+    /// 1. The swap is priced at the average belief across its own walk, so what the hook
+    ///    collects and pays telescopes. A swap that creates a belief pays for it; the
+    ///    atomic build-then-harvest no longer has a free first leg.
+    ///
+    /// 2. The offset is sized from the flow that moved the belief, not from the swap's
+    ///    notional. Flow is measured in whole flow units, so a swap smaller than one unit
+    ///    moves the belief by nothing — and if it were still priced on its notional, it
+    ///    could be repeated against a belief that never shrinks. The two now agree to the
+    ///    wei: no walk, no offset.
+    ///
+    /// 3. A currency0 offset is converted at the price the block opened at, never at a
+    ///    price the trader's own transaction produced. The potential is kept in currency1;
+    ///    an offset collected in currency0 at a price the trader has pushed up is worth
+    ///    less than the potential it stands for once the price is put back. See
+    ///    `_offsetAmount`.
+    ///
+    /// The fee bound and the dust threshold apply to payouts, and payouts are discounted by
+    /// one fee to cover a reference that is stale by up to a block.
     function _applyOffset(
         PoolId id,
         PoolKey calldata key,
         SwapParams calldata params,
         BalanceDelta delta,
-        PoolState memory s,
-        PoolStateAux memory a
+        Walk memory w
     ) private returns (int128) {
-        int256 d = s.deltaX64;
+        if (w.walkedWei == 0) return 0;
+
+        int256 d = BeliefState.walkAverage(w.x0, w.x1, int256(uint256(DELTA_MAX_X64)));
         if (d == 0 || !allowlisted[id]) return 0;
 
         Currency unspecified = _unspecifiedCurrency(key, params);
@@ -639,20 +784,15 @@ contract VaneHook is IHooks, IUnlockCallback {
         uint256 reserve;
 
         if (!hookTakes) {
-            d = BeliefState.dampPending(
-                d, BeliefState.pendingIncrement(int256(uint256(a.kappaX64)), int256(a.flowAccum))
-            );
-            if (d == 0) return 0;
             reserve = reserveOf(unspecified);
-            d = _scaleForReserve(id, d, unspecified, reserve);
+            d = _clampPayout(_scaleForReserve(id, d, unspecified, reserve), key.fee);
+            if (d == 0) return 0;
         }
 
-        d = _clampBelief(d, key.fee, hookTakes);
-        if (d == 0) return 0;
+        uint256 amount = _offsetAmount(params, delta, d, w, hookTakes);
+        if (!hookTakes) amount = _feeHaircut(amount, key.fee);
 
-        (int128 hookDelta, uint256 shortfall) = _capToReserve(
-            _signedOffset(hookTakes, OffsetDelta.offsetAmount(_unspecifiedAmount(params, delta), d)), reserve
-        );
+        (int128 hookDelta, uint256 shortfall) = _capToReserve(_signedOffset(hookTakes, amount), reserve);
 
         // The only degradation with a funding remedy, and it was silent. BeliefScaled does
         // not cover it: that fires when the reserve is below target, whereas a payout can
@@ -666,7 +806,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         return hookDelta;
     }
 
-    /// Clamps the belief, and on the paying side clamps it by the pool's own fee.
+    /// Clamps a payout by the pool's own fee, and drops it below the dust threshold.
     ///
     /// `deltaMaxX64` is a single global parameter and was the only bound here, so nothing
     /// tied the size of the correction to the pool it was applied to. On any pool whose
@@ -676,37 +816,99 @@ contract VaneHook is IHooks, IUnlockCallback {
     /// deltaMax of 1% against a 5bp pool that is 0.95% of notional, and a single
     /// well-sized trade realises it — measured at 7.53 ether on 1,000 of notional.
     ///
-    /// Repeating it is self-defeating, because curve slippage overtakes the edge within a
-    /// few trades, so this was never unbounded draining. But one profitable bite per
-    /// belief is still the protocol paying an arbitrageur out of reserve for nothing.
-    ///
     /// Bounding the paying side by the fee removes the edge rather than capping it: the
     /// best the favourable leg can do is break even against the market. The taking side is
-    /// left on deltaMax alone, because there the hook collects and a trader paying more
-    /// than the fee is the correction working as intended.
-    function _clampBelief(int256 d, uint24 fee, bool hookTakes) private view returns (int256) {
+    /// left on deltaMax alone, which `walkAverage` already enforces, because there the hook
+    /// collects and a trader paying more than the fee is the correction working.
+    ///
+    /// Dust applies to payouts only. Applied to both sides it was a free band: a belief
+    /// built through it in small steps paid nothing, and walked back through it in one
+    /// large step was paid for all of it, worth up to dust^2 / (2 * kappa) a loop. A take
+    /// too small to matter is left to round to zero in `offsetAmount` instead.
+    function _clampPayout(int256 d, uint24 fee) private view returns (int256) {
         int256 cap = int256(uint256(DELTA_MAX_X64));
 
-        if (!hookTakes) {
-            // v4 fees are hundredths of a basis point, so a fee of `f` is f/1e6 of price.
-            int256 feeCap = (int256(uint256(fee)) * int256(uint256(ONE_X64_U))) / int256(FEE_DENOMINATOR);
-            if (feeCap < cap) cap = feeCap;
-        }
+        // v4 fees are hundredths of a basis point, so a fee of `f` is f/1e6 of price.
+        int256 feeCap = (int256(uint256(fee)) * int256(uint256(ONE_X64_U))) / int256(FEE_DENOMINATOR);
+        if (feeCap < cap) cap = feeCap;
 
         if (d > cap) d = cap;
         if (d < -cap) d = -cap;
         return Q64x64.abs(d) < uint256(DELTA_DUST_X64) ? int256(0) : d;
     }
 
+    /// The offset owed on the flow this swap walked, in the unspecified currency.
+    ///
+    /// The potential the walk telescopes is denominated in currency1, because flow is. When
+    /// the unspecified currency is currency1 the base is the walked flow itself, which is
+    /// below the swap's notional only by the part of a flow unit that measured as nothing.
+    ///
+    /// When it is currency0 the walked flow has to be converted, and the rate is where the
+    /// remaining exploit lived. The swap's own execution rate is a price the trader sets:
+    /// push the pool up with liquidity of your own, buy into the belief while it is high so
+    /// the hook collects currency0 at the inflated rate, sell back for currency1, and put
+    /// the price back. Valued where it started, the currency0 the hook collected is worth
+    /// less than the potential it was charged against — measured at 0.093 ether lost on a
+    /// twelve-leg loop, with the loss growing in the size of the price excursion.
+    ///
+    /// So the conversion uses the price the block opened at, which `beforeSwap` read before
+    /// anything in this block could move it, bounded against the execution rate in the
+    /// hook's favour: the larger of the two amounts when it collects, the smaller when it
+    /// pays. Against the reference the hook is then exact; against the execution rate it
+    /// is never worse. A tick is a floor of the log price, so the reference is read one
+    /// tick on the hook's side of the true opening price.
+    ///
+    /// The exponent's sign follows the unspecified currency. A belief `d` scales the price
+    /// of currency0 by e^d, so an amount of currency1 scales by e^d and an amount of
+    /// currency0 by e^-d — in both directions and both exactness modes. Using e^d for both
+    /// mispriced the currency0 quadrants at second order, and in the exact-output sell it
+    /// did so in the trader's favour.
+    function _offsetAmount(SwapParams calldata params, BalanceDelta delta, int256 d, Walk memory w, bool hookTakes)
+        private
+        pure
+        returns (uint256)
+    {
+        bool unspecifiedIsOne = params.zeroForOne == (params.amountSpecified < 0);
+        if (unspecifiedIsOne) return OffsetDelta.offsetAmount(w.walkedWei, d);
+        return OffsetDelta.offsetAmount(_toCurrency0(delta, w, hookTakes), -d);
+    }
+
+    /// Converts the walked flow into currency0. See `_offsetAmount`.
+    ///
+    /// No overflow and no revert: the walked flow is below 2^128 and the reference sqrt
+    /// price above 2^32, so each mulDiv result is below 2^192 and then 2^256; the execution
+    /// leg multiplies two int128 magnitudes; and amount1 is nonzero because at least one
+    /// whole flow unit was walked.
+    function _toCurrency0(BalanceDelta delta, Walk memory w, bool hookTakes) private pure returns (uint256) {
+        uint256 atExecution;
+        unchecked {
+            atExecution = (Q64x64.abs(int256(delta.amount0())) * w.walkedWei) / Q64x64.abs(int256(delta.amount1()));
+        }
+
+        int24 tick = w.refTick;
+        if (!hookTakes && tick < TickMath.MAX_TICK) tick += 1;
+        uint160 sqrtRef = TickMath.getSqrtPriceAtTick(tick);
+        uint256 atReference =
+            FullMath.mulDiv(FullMath.mulDiv(w.walkedWei, FixedPoint96.Q96, sqrtRef), FixedPoint96.Q96, sqrtRef);
+
+        if (hookTakes) return atReference > atExecution ? atReference : atExecution;
+        return atReference < atExecution ? atReference : atExecution;
+    }
+
+    /// Discounts a payout by one fee, for a reference price that can be up to a block
+    /// stale against the market the trader exits into.
+    ///
+    /// Unchecked: the amount is below 2^128 and the factor below 2^20. The fee is at most
+    /// 1e6 for a static-fee pool, which `beforeInitialize` makes the only kind.
+    function _feeHaircut(uint256 amount, uint24 fee) private pure returns (uint256) {
+        unchecked {
+            return (amount * (FEE_DENOMINATOR - uint256(fee))) / FEE_DENOMINATOR;
+        }
+    }
+
     function _signedOffset(bool hookTakes, uint256 amount) private pure returns (int128) {
         if (amount == 0) return 0;
         return hookTakes ? int128(int256(amount)) : -int128(int256(amount));
-    }
-
-    function _unspecifiedAmount(SwapParams calldata params, BalanceDelta delta) private pure returns (uint256) {
-        bool specifiedIsZero = params.zeroForOne == (params.amountSpecified < 0);
-        int128 unspecifiedDelta = specifiedIsZero ? delta.amount1() : delta.amount0();
-        return Q64x64.abs(int256(unspecifiedDelta));
     }
 
     function _unspecifiedCurrency(PoolKey calldata key, SwapParams calldata params) private pure returns (Currency) {
