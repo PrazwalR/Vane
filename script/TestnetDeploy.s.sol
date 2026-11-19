@@ -48,8 +48,20 @@ contract TestnetDeploy is Script {
         token1.mint(deployer, 1_000_000 ether);
 
         bytes memory args = abi.encode(IPoolManager(poolManager), VaneParameters.config(), deployer);
-        (address mined, bytes32 salt) =
-            HookMiner.find(CREATE2_DEPLOYER, EXPECTED_FLAGS, type(VaneHook).creationCode, args);
+        // A salt mined off chain is used as given; the address and flag checks below still
+        // apply to it. Mining here instead costs an RPC round trip per candidate address on
+        // a fork, long enough for a public node to stop serving the forked block's state.
+        address mined;
+        bytes32 salt;
+        uint256 givenSalt = vm.envOr("VANE_SALT", type(uint256).max);
+        if (givenSalt != type(uint256).max) {
+            salt = bytes32(givenSalt);
+            mined = HookMiner.computeAddressFromHash(
+                CREATE2_DEPLOYER, givenSalt, keccak256(abi.encodePacked(type(VaneHook).creationCode, args))
+            );
+        } else {
+            (mined, salt) = HookMiner.find(CREATE2_DEPLOYER, EXPECTED_FLAGS, type(VaneHook).creationCode, args);
+        }
 
         VaneHook hook = new VaneHook{salt: salt}(IPoolManager(poolManager), VaneParameters.config(), deployer);
 
