@@ -144,7 +144,7 @@ model-free: it needs only the definition of an efficient price.
 M0 through M5 are implemented and tested: the signed offset and its v4 accounting, both
 variance estimators, depth and open-loop `kappa`, the leaky variance-ratio controller,
 the Route B divergence check, the reserve and its graceful degradation, and a validated
-deploy path. 262 Solidity tests plus 15 covering the replay engine, including fuzz,
+deploy path. 267 Solidity tests plus 15 covering the replay engine, including fuzz,
 stateful invariants, threat-model regressions and the audit's reproductions; slither
 reports nothing.
 

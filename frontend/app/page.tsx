@@ -323,6 +323,10 @@ export default function Home() {
           </div>
         </div>
         <p className="addr">
+          Built from commit <a href={`${REPO}/commit/${SEPOLIA.commit}`}>{SEPOLIA.commit}</a>.
+          Fixes made after that commit are in the source but not in this deployment.
+        </p>
+        <p className="addr">
           Hook <a href={EXPLORER}>{SEPOLIA.vaneHook}</a>
         </p>
       </section>

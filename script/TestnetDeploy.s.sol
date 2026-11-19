@@ -32,11 +32,75 @@ contract TestnetDeploy is Script {
     error TestnetDeploy__AddressMismatch(address expected, address actual);
     error TestnetDeploy__FlagMismatch(uint160 expected, uint160 actual);
 
-    /// Deploys two test tokens, or reuses the pair named by TOKEN0 and TOKEN1 when a
-    /// previous run already deployed them. Mints the deployer a balance either way.
-    function _tokens(address deployer) internal returns (MockERC20 token0, MockERC20 token1) {
-        address given0 = vm.envOr("TOKEN0", address(0));
-        address given1 = vm.envOr("TOKEN1", address(0));
+    struct Deployment {
+        VaneHook hook;
+        MockERC20 token0;
+        MockERC20 token1;
+        PoolKey poolKey;
+    }
+
+    function run() external returns (Deployment memory d) {
+        uint256 expectedChainId = vm.envUint("EXPECTED_CHAIN_ID");
+        if (block.chainid != expectedChainId) revert TestnetDeploy__WrongChain(block.chainid);
+
+        d = deploy(
+            vm.envAddress("POOL_MANAGER"),
+            vm.envUint("DEPLOYER_PRIVATE_KEY"),
+            vm.envOr("VANE_SALT", type(uint256).max),
+            vm.envOr("TOKEN0", address(0)),
+            vm.envOr("TOKEN1", address(0))
+        );
+
+        console2.log("chain", block.chainid);
+        console2.log("hook", address(d.hook));
+        console2.log("token0", address(d.token0));
+        console2.log("token1", address(d.token1));
+        console2.log("poolId");
+        console2.logBytes32(PoolId.unwrap(d.poolKey.toId()));
+    }
+
+    /// Everything `run` does after reading the environment, taking its inputs as arguments
+    /// so a test can drive it without process-wide environment variables.
+    ///
+    /// Resumable. On a chain whose gas schedule is newer than the one forge simulates, a run
+    /// can die part-way, and every step that already landed is skipped on a rerun with the
+    /// same salt and tokens. `givenSalt` of `type(uint256).max` means mine one here, which
+    /// costs an RPC round trip per candidate address on a fork; mining off chain and passing
+    /// it in avoids that. `given0` and `given1` reuse an earlier run's tokens when both are
+    /// set.
+    function deploy(address poolManager, uint256 key, uint256 givenSalt, address given0, address given1)
+        public
+        returns (Deployment memory d)
+    {
+        address deployer = vm.addr(key);
+        vm.startBroadcast(key);
+
+        (d.token0, d.token1) = _tokens(deployer, given0, given1);
+        d.hook = _hook(poolManager, deployer, givenSalt);
+
+        d.poolKey = PoolKey({
+            currency0: Currency.wrap(address(d.token0)),
+            currency1: Currency.wrap(address(d.token1)),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(d.hook))
+        });
+
+        // Both are skipped when an earlier run got that far. Re-allowlisting would not be
+        // harmless on a live pool: it discards the pool's belief.
+        if (!d.hook.allowlisted(d.poolKey.toId())) d.hook.allowPool(d.poolKey);
+        (uint160 sqrtPriceX96,,,) = IPoolManager(poolManager).getSlot0(d.poolKey.toId());
+        if (sqrtPriceX96 == 0) IPoolManager(poolManager).initialize(d.poolKey, SQRT_PRICE_1_1);
+
+        vm.stopBroadcast();
+    }
+
+    /// Deploys two test tokens, or reuses the given pair. Mints the deployer a balance
+    /// either way.
+    function _tokens(address deployer, address given0, address given1)
+        internal
+        returns (MockERC20 token0, MockERC20 token1)
+    {
         MockERC20 tokenA;
         MockERC20 tokenB;
         if (given0 != address(0) && given1 != address(0)) {
@@ -52,25 +116,13 @@ contract TestnetDeploy is Script {
         token1.mint(deployer, 1_000_000 ether);
     }
 
-    function run() external {
-        uint256 expectedChainId = vm.envUint("EXPECTED_CHAIN_ID");
-        if (block.chainid != expectedChainId) revert TestnetDeploy__WrongChain(block.chainid);
-
-        address poolManager = vm.envAddress("POOL_MANAGER");
-        uint256 key = vm.envUint("DEPLOYER_PRIVATE_KEY");
-        address deployer = vm.addr(key);
-
-        vm.startBroadcast(key);
-
-        (MockERC20 token0, MockERC20 token1) = _tokens(deployer);
-
+    /// Deploys the hook at its mined address, or reuses it if an earlier run already did.
+    /// Reuse is sound because the address commits to the exact init code, so code already
+    /// there is this hook with this owner, pool manager and configuration.
+    function _hook(address poolManager, address deployer, uint256 givenSalt) internal returns (VaneHook hook) {
         bytes memory args = abi.encode(IPoolManager(poolManager), VaneParameters.config(), deployer);
-        // A salt mined off chain is used as given; the address and flag checks below still
-        // apply to it. Mining here instead costs an RPC round trip per candidate address on
-        // a fork, long enough for a public node to stop serving the forked block's state.
         address mined;
         bytes32 salt;
-        uint256 givenSalt = vm.envOr("VANE_SALT", type(uint256).max);
         if (givenSalt != type(uint256).max) {
             salt = bytes32(givenSalt);
             mined = HookMiner.computeAddressFromHash(
@@ -80,12 +132,6 @@ contract TestnetDeploy is Script {
             (mined, salt) = HookMiner.find(CREATE2_DEPLOYER, EXPECTED_FLAGS, type(VaneHook).creationCode, args);
         }
 
-        // Resumable. On a chain whose gas schedule is newer than the one forge simulates,
-        // a run can die part-way with the hook already deployed, and a second `new` at the
-        // same CREATE2 address would revert. Reusing it is sound: the address commits to
-        // the exact init code, so code already there is this hook with this owner, pool
-        // manager and configuration.
-        VaneHook hook;
         if (mined.code.length == 0) {
             hook = new VaneHook{salt: salt}(IPoolManager(poolManager), VaneParameters.config(), deployer);
             if (address(hook) != mined) revert TestnetDeploy__AddressMismatch(mined, address(hook));
@@ -95,31 +141,6 @@ contract TestnetDeploy is Script {
         }
 
         uint160 actualFlags = uint160(address(hook)) & HookMiner.FLAG_MASK;
-        if (actualFlags != EXPECTED_FLAGS) {
-            revert TestnetDeploy__FlagMismatch(EXPECTED_FLAGS, actualFlags);
-        }
-
-        PoolKey memory poolKey = PoolKey({
-            currency0: Currency.wrap(address(token0)),
-            currency1: Currency.wrap(address(token1)),
-            fee: 3000,
-            tickSpacing: 60,
-            hooks: IHooks(address(hook))
-        });
-
-        // Both are skipped when an earlier run got that far. Re-allowlisting would not be
-        // harmless on a live pool: it discards the pool's belief.
-        if (!hook.allowlisted(poolKey.toId())) hook.allowPool(poolKey);
-        (uint160 sqrtPriceX96,,,) = IPoolManager(poolManager).getSlot0(poolKey.toId());
-        if (sqrtPriceX96 == 0) IPoolManager(poolManager).initialize(poolKey, SQRT_PRICE_1_1);
-
-        vm.stopBroadcast();
-
-        console2.log("chain", block.chainid);
-        console2.log("hook", address(hook));
-        console2.log("token0", address(token0));
-        console2.log("token1", address(token1));
-        console2.log("poolId");
-        console2.logBytes32(PoolId.unwrap(poolKey.toId()));
+        if (actualFlags != EXPECTED_FLAGS) revert TestnetDeploy__FlagMismatch(EXPECTED_FLAGS, actualFlags);
     }
 }

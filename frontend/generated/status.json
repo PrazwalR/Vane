@@ -1,7 +1,7 @@
 {
   "generatedAt": "2026-11-19",
-  "tests": 264,
-  "testSuites": 28,
+  "tests": 267,
+  "testSuites": 29,
   "rustTests": 15,
   "statefulInvariants": 7,
   "runtimeBytes": 21522,
