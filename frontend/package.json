@@ -11,7 +11,7 @@
     "predev": "node scripts/sync-deployments.mjs"
   },
   "dependencies": {
-    "next": "16.3.5",
+    "next": "16.4.6",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
@@ -20,5 +20,10 @@
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "typescript": "5.9.2"
+  },
+  "pnpm": {
+    "overrides": {
+      "source-map-js": "1.2.2"
+    }
   }
 }

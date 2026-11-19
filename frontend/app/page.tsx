@@ -1,10 +1,17 @@
 import Image from "next/image";
 import deployments from "../generated/deployments.json";
 import status from "../generated/status.json";
+import LiveState from "./LiveState";
 
 const REPO = "https://github.com/PrazwalR/Vane";
 const SEPOLIA = deployments["11155111"];
 const EXPLORER = `https://sepolia.etherscan.io/address/${SEPOLIA.vaneHook}`;
+
+// The settlement rework moved the block rollover into beforeSwap, so a hook carrying the
+// fix must have the BEFORE_SWAP permission bit (1 << 7) in its address. Reading it from the
+// deployment record means the page cannot claim a fix the deployed bytecode lacks.
+const BEFORE_SWAP_FLAG = 1 << 7;
+const HAS_SETTLEMENT_FIX = (SEPOLIA.hookFlags & BEFORE_SWAP_FLAG) !== 0;
 
 type Finding = {
   what: string;
@@ -67,26 +74,77 @@ const FINDINGS: Finding[] = [
   },
   {
     what:
+      "One transaction could build a belief for free and trade back against it. A block's first swap was priced before the belief it created, and liquidity supplied in the same transaction returned the fee: 141 ether out of the reserve, from a gain formed by real flow with no manual state.",
+    severity: "Critical",
+    state: "Fixed",
+  },
+  {
+    what:
+      "Currency0 offsets were converted at a price the trader's own transaction set. Push the pool up with your own liquidity, collect at the inflated rate, put the price back: up to 35 ether out of the reserve per transaction.",
+    severity: "Critical",
+    state: "Fixed",
+  },
+  {
+    what:
+      "A belief outlived a withdrawn gain. At a gain of zero it no longer shrank as it was traded against, so it could be sold into for as long as the reserve lasted.",
+    severity: "High",
+    state: "Fixed",
+  },
+  {
+    what:
+      "Measurement windows straddled blocks. Flow that flipped direction every block cancelled inside a window while the price still moved, which inflated the gain on demand — and the test suite's own “organic” gain turned out to depend on it.",
+    severity: "Medium",
+    state: "Fixed",
+  },
+  {
+    what:
+      "Swaps smaller than one flow unit were paid on their notional while moving the belief by nothing, so the same payout could be taken again and again.",
+    severity: "Medium",
+    state: "Fixed",
+  },
+  {
+    what: "On a dynamic-fee pool the payout bound read the fee field's flag as an 838% fee.",
+    severity: "Medium",
+    state: "Fixed",
+  },
+  {
+    what:
       "The open-loop gain is identically zero under flow-induced volatility, by a factor of exactly two. A correction requires a variance ratio above four.",
     severity: null,
     state: "Open",
   },
   {
     what:
-      "The belief peaks at roughly half its own dust threshold, so no offset is ever applied and the reserve never moves.",
+      "The effect is small. In trending replays, arbitrage profit against the pool falls by 0.13% to 0.51% and the reserve grows; one seed, uncalibrated parameters.",
     severity: null,
     state: "Open",
   },
   {
-    what: `Worst-case gas is ${status.worstCaseGasOverhead.toLocaleString()} against a ${status.gasBudget.toLocaleString()} budget.`,
+    what:
+      "Whoever controls the last transaction of one block and the first of the next can choose the opening price that currency0 offsets are converted at.",
     severity: null,
     state: "Open",
   },
   {
-    what: "The decay rate and horizon are uncalibrated; no regime yet produces a payout to calibrate against.",
+    what: `Worst-case gas is ${status.worstCaseGasOverhead.toLocaleString()} against a ${status.gasBudget.toLocaleString()} budget, on the once-per-horizon checkpoint with an active belief.`,
     severity: null,
     state: "Open",
   },
+  {
+    what: "The decay rate and horizon are uncalibrated, though there is now a regime that produces a payout to calibrate them against.",
+    severity: null,
+    state: "Open",
+  },
+];
+
+// From `sim/` at commit 2fd533f: 400 blocks, seed 1, 1e6 ether of liquidity at the 0.30%
+// tier, against an identical plain pool. Reproduce with
+// `./target/release/vane-sim --blocks 400 --momentum <m> --json`.
+const SIM_RESULTS = [
+  { momentum: "0.00", vr: "1.06", live: false, lvr: "unchanged", reserve: "0" },
+  { momentum: "0.80", vr: "3.08", live: false, lvr: "unchanged", reserve: "0" },
+  { momentum: "0.90", vr: "3.79", live: true, lvr: "−0.13%", reserve: "+0.09 ETH" },
+  { momentum: "0.95", vr: "4.20", live: true, lvr: "−0.51%", reserve: "+0.81 ETH" },
 ];
 
 function pillClass(f: Finding) {
@@ -184,14 +242,33 @@ export default function Home() {
           When the belief is positive a buyer pays slightly more{" "}
           <strong>and a seller receives slightly more</strong>. Both sides trade at a shifted
           price. A fee is unsigned and takes from everyone; this is a quote that moves in a
-          direction.
+          direction. The side the hook pays is bounded by the pool&rsquo;s own fee, so the
+          favourable leg can at best break even against the market.
         </p>
 
-        <h3>Self-limiting</h3>
+        <h3>Every trade pays for the belief it moves</h3>
         <p>
-          Flow against the belief is paid out, but that same flow drives the belief toward
-          zero, so the exposure extinguishes itself. A round trip through the belief loses
-          money for the trader.
+          The belief moves with flow, so a swap is priced at the <em>average</em> belief
+          across its own walk, not at the belief it happened to find. What the hook collects
+          and pays is then the change in a potential, and it telescopes: any sequence of
+          trades that returns the belief to where it started nets to zero, however it is
+          split. The only way to be paid is to walk back a belief someone else paid to build.
+        </p>
+        <div className="eq">
+          take = G(x₁) − G(x₀),&nbsp;&nbsp; G(x) = ∫₀ˣ clamp(t) dt
+          <span className="note">
+            That holds against a trader who also supplies the pool&rsquo;s liquidity in the
+            same transaction and so gets the fee back, which is the case that defeated every
+            argument resting on the fee.
+          </span>
+        </div>
+
+        <h3>One price a transaction cannot move</h3>
+        <p>
+          Flow is measured in the quote token, so an offset paid in the other token has to be
+          converted. It is converted at the price the block <em>opened</em> at, which the
+          hook reads before the block&rsquo;s first swap executes, and never at a rate the
+          trader&rsquo;s own transaction produced.
         </p>
       </section>
 
@@ -199,10 +276,26 @@ export default function Home() {
         <p className="eyebrow">Live state</p>
         <h2>Read from the deployed contract</h2>
         <p>
-          The hook is deployed on Ethereum Sepolia. These are the addresses; the estimator
-          values are deliberately not rendered here yet, because a figure on this page should
-          come from a live read rather than a build-time snapshot.
+          The hook is deployed on Ethereum Sepolia. The figures below are read from it by
+          your browser every fifteen seconds, not baked into the page when it was built.
         </p>
+        {!HAS_SETTLEMENT_FIX && (
+          <div className="callout">
+            <span className="label">Older deployment</span>
+            <p>
+              This Sepolia hook predates the settlement rework described above, so it still
+              carries both one-transaction drains in the incident register. It holds test
+              tokens only. A redeploy of the fixed contract is pending.
+            </p>
+          </div>
+        )}
+        <LiveState
+          hook={SEPOLIA.vaneHook}
+          poolId={SEPOLIA.poolId}
+          token0={SEPOLIA.token0}
+          token1={SEPOLIA.token1}
+          flowUnit={SEPOLIA.flowUnit}
+        />
         <div className="grid">
           <div className="cell">
             <span className="k">Network</span>
@@ -210,7 +303,7 @@ export default function Home() {
           </div>
           <div className="cell">
             <span className="k">Hook flags</span>
-            <span className="v">{SEPOLIA.hookFlags}</span>
+            <span className="v">0x{SEPOLIA.hookFlags.toString(16).toUpperCase()}</span>
           </div>
           <div className="cell">
             <span className="k">Fee tier</span>
@@ -298,20 +391,56 @@ export default function Home() {
           including {status.statefulInvariants} stateful invariants over roughly fifty thousand randomised calls,
           and {status.rustTests} tests covering the replay engine that measures it.
         </p>
+
+        <h3>What the replay simulator measured</h3>
+        <p>
+          The simulator executes the compiled hook inside an EVM against Kyle-model order
+          flow, next to a plain pool on identical liquidity, for 400 blocks. Arbitrage profit
+          marked at the fundamental is loss-versus-rebalancing, so a smaller number is LPs
+          losing less.
+        </p>
+        <div className="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Trend strength</th>
+                <th>Variance ratio</th>
+                <th>Gain</th>
+                <th>Arbitrage profit vs plain pool</th>
+                <th>Reserve</th>
+              </tr>
+            </thead>
+            <tbody>
+              {SIM_RESULTS.map((r) => (
+                <tr key={r.momentum}>
+                  <td>{r.momentum}</td>
+                  <td>{r.vr}</td>
+                  <td>{r.live ? <span className="pill ok">live</span> : "zero"}</td>
+                  <td>{r.lvr}</td>
+                  <td>{r.reserve}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Where the price is a near-martingale the gain is zero, which is correct: there is
+          nothing to correct. Once the price trends hard enough the gain switches on where the
+          algebra puts it, arbitrage profit falls, and the reserve grows, paid for by the flow
+          that trends the price. It is one seed and a small effect.
+        </p>
+
         <div className="callout">
           <span className="label">Not production ready</span>
           <p>
-            This is research code. The replay simulator now exists and has run, and its
-            result is negative: under volatility generated by the pool&rsquo;s own flow the
+            This is research code. Under volatility generated by the pool&rsquo;s own flow the
             open-loop gain is <strong>identically zero</strong>, because the AMM&rsquo;s
             impact function ties the two estimates it compares together at a ratio of one
-            half. A correction only arises where the variance ratio exceeds four, and even
-            then the belief peaks at about half its own dust threshold, so no offset is
-            applied and the reserve does not move. The decay rate and horizon remain
-            uncalibrated because there is still no regime that produces a payout to
-            calibrate against. Worst-case gas is {status.worstCaseGasOverhead.toLocaleString()}{" "}
-            against a {status.gasBudget.toLocaleString()} budget. Nothing here has been
-            audited by a third party.
+            half, so a correction only arises where the variance ratio exceeds four. The
+            decay rate and horizon are uncalibrated. Worst-case gas is{" "}
+            {status.worstCaseGasOverhead.toLocaleString()} against a{" "}
+            {status.gasBudget.toLocaleString()} budget, on the once-per-horizon checkpoint.
+            Nothing here has been audited by a third party.
           </p>
         </div>
       </section>
@@ -353,6 +482,13 @@ export default function Home() {
           the parameters needed re-deriving. It was not the parameters. No parameter choice
           could have fixed it, because the extra division discards the result&rsquo;s entire
           scale regardless of magnitude.
+        </p>
+        <p>
+          The two newest criticals share a lesson. Both were closed by the same argument
+          rather than by another bound: make what the hook collects and pays the change in a
+          potential, and denominate it in a price nobody inside the transaction can move.
+          Each is kept as a regression with its assertion inverted, and the conversion fix is
+          checked by reverting it and watching the fuzz campaign find the drain again.
         </p>
       </section>
 
