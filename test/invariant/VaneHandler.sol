@@ -62,7 +62,7 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
     /// leg. Currency0 offsets are converted from that flow at the price the BLOCK opened at,
     /// not the swap's own rate, so a block that moves the price a long way can size a
     /// currency0 offset well beyond the swap's currency0 leg. Its notional is therefore the
-    /// larger of that leg and the currency1 leg converted at the block's opening price.
+    /// larger of that leg and the currency1 leg converted at the lowest reference price.
     uint256 public ghostNotional0;
     uint256 public ghostNotional1;
 
@@ -231,7 +231,13 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
         uint256 m0 = uint256(uint128(a0 < 0 ? -a0 : a0));
         uint256 m1 = uint256(uint128(a1 < 0 ? -a1 : a1));
 
-        uint160 sqrtOpen = TickMath.getSqrtPriceAtTick(hook.poolState(key.toId()).lastTick);
+        // The hook converts at the lower of the block's opening tick and the slow average of
+        // earlier openings when it collects, so the largest currency0 amount it can size an
+        // offset from is the currency1 leg converted at that lower tick.
+        int256 refTick = int256(hook.poolState(key.toId()).lastTick);
+        int256 avgFloor = hook.openTickAverageX8Of(key.toId()) >> 8;
+        if (avgFloor < refTick) refTick = avgFloor;
+        uint160 sqrtOpen = TickMath.getSqrtPriceAtTick(int24(refTick));
         uint256 m1In0 = FullMath.mulDiv(FullMath.mulDiv(m1, FixedPoint96.Q96, sqrtOpen), FixedPoint96.Q96, sqrtOpen);
 
         ghostNotional0 += m0 > m1In0 ? m0 : m1In0;

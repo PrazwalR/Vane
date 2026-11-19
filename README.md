@@ -90,15 +90,27 @@ nothing, so they are now priced at nothing rather than at their notional. And th
 threshold applies only to payouts, since a symmetric one was a free band worth
 `dust^2 / (2 kappa)` a loop.
 
-The residual is the one any spot-anchored design has: a party that controls the last
-transaction of one block and the first of the next can choose the opening price. That
-needs the manipulated price to survive a block boundary rather than a single transaction.
+That left one residual: a party that controls the last transaction of one block and the
+first of the next can choose the opening price itself. Push the pool up in block N with
+exact-output buys, which settle exactly in currency1, hold the price across the boundary,
+and harvest in block N+1 against an inflated reference. A fuzz campaign found it taking
+0.138 ether out of the reserve. Conversions are now also bounded against a slow average of
+opening prices, weighting each block by 1/16, and the average deliberately excludes the
+current block's opening: folding it in let the attacker move the very reference they were
+checked against, which still leaked 0.00014 ether. Lagged by a block, a false price has to
+survive two boundaries to touch the reference and about a dozen to move it halfway, each
+one open to arbitrage. Honest traders pay for this only while the price genuinely trends:
+a currency0 offset is then sized at a stale price, so it is overcharged by the offset times
+the price's drift from its recent average. The bias always favours the reserve.
 
 ## Estimating the inputs on chain
 
 Everything is computed inside the hook in integer arithmetic. Ordinary swaps cost the hook
-9,700 gas (no belief) to 22,300 (active belief), against a 45,000 budget; the once-per-horizon
-checkpoint with an active belief is the recorded exception, at 76,200.
+9,700 gas (no belief) to 24,200 (the first swap of a block), against a 45,000 budget. The
+recorded exception is the once-per-horizon checkpoint with an active belief, at 56,000: four
+storage slots written once a block plus a payout's reserve read and claim burn, which is a
+floor above the budget for that one path. It was reported as 76,200 until the measurement
+was moved off the pool's first checkpoint, which pays a one-time 20,000-gas storage write.
 
 **Ticks are log prices.** `ln P = tick * ln(1.0001)`, so a tick difference *is* a log
 return up to a constant. Every variance estimate is integer arithmetic — no `ln`, no
@@ -223,6 +235,20 @@ cp .env.example .env      # fill in POOL_MANAGER, DEPLOYER_PRIVATE_KEY
 forge script script/DeployVane.s.sol --rpc-url $RPC_URL --broadcast
 forge script script/InitializePool.s.sol --rpc-url $RPC_URL --broadcast
 ```
+
+Two things learned redeploying to Sepolia in November 2026:
+
+- **Forge's gas estimates can be far too low.** Forge simulates with the Cancun schedule in
+  `foundry.toml`, and Sepolia now charges about 1,540 gas per byte of deployed code against
+  Cancun's 200, so creations ran out of gas at forge's estimate. The hook alone takes 33.1M.
+  Pass `--gas-estimate-multiplier 1000` on such a chain, or send the creation with
+  `cast send --gas-limit` set from the node's own `eth_estimateGas`.
+- **Mine the salt off chain.** Mining inside a forked script costs an RPC round trip per
+  candidate address, long enough for a public node to stop serving the forked block. Print
+  the init code hash with `script/PrintCtorArgs.s.sol`, mine with
+  `cast create2 --ends-with 30c4 --init-code-hash <hash>`, and pass the salt as `VANE_SALT`
+  to `script/TestnetDeploy.s.sol`. That script is resumable: rerun with the same salt and
+  `TOKEN0`/`TOKEN1`, and every step that already landed is skipped.
 
 ## Prior art
 

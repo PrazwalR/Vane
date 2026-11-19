@@ -1,25 +1,38 @@
 # frontend
 
-Placeholder. The site design is still being worked out, so this directory is
-intentionally empty of implementation.
+The project site: a single static page built with Next.js, plus one client component that
+reads the deployed hook from Sepolia in the visitor's browser.
 
-## What already exists elsewhere
+```
+pnpm install
+pnpm dev        # http://localhost:3000
+pnpm build      # static export of the page
+```
 
-- `deployments.json` at the repo root records the deployed hook, pool id and tokens
-  per chain. That is the source of truth for anything the UI needs to address.
-- The hook exposes a full read surface for a dashboard, all `external view`:
-  `config()`, `poolState()`, `poolStateAux()`, `flowCovOf()`, `kappaOf()`,
-  `beliefOf()`, `reserveOf()`, `targetFor()`, `flowUnitOf()`, `allowlisted()`.
-- A working viem read layer was built and verified against a live chain. It was
-  removed along with the first site rather than left half-wired; recover it from
-  git history at `web/lib/chain.ts` if useful.
+## Where the numbers come from
 
-## Notes for whatever gets built here
+Nothing on the page is typed by hand.
 
-- Values are fixed point. The belief and kappa are Q64.64; variance and the EWMA
-  decays are Q32.32. Divide by `2^64` or `2^32` respectively before display.
-- A variance ratio of zero means "no signal", not mean reversion. The controller
-  declines to act on it, and the UI should say so rather than render `0.000`.
-- Nothing about a deployment should be hardcoded. Read it from `deployments.json`
-  or from environment variables, the same rule the contract applies to its own
-  parameters.
+- `generated/deployments.json` is copied from `deployments.json` at the repository root by
+  `scripts/sync-deployments.mjs` before every build. The copy is committed, so a deploy that
+  uploads only this directory still has it.
+- `generated/status.json` is written by `scripts/collect-status.sh` at the repository root
+  from the toolchain: test counts, coverage, runtime size, slither findings and the
+  worst-case gas figure. CI fails if the committed copy drifts from what the toolchain
+  reports.
+- `app/LiveState.tsx` reads the belief, the gain, both reserves and the pool's last rolled
+  block straight from the hook every fifteen seconds, as one JSON-RPC batch to a public
+  Sepolia endpoint. It needs an endpoint that accepts a six-call batch and sends permissive
+  CORS headers; publicnode and 1rpc do, and the others tried do not.
+- The simulator table in `app/page.tsx` is the one hand-copied block. Its comment names the
+  commit and the command that reproduces it.
+
+## Notes
+
+- Values are fixed point. The belief and kappa are Q64.64; variance and the EWMA decays are
+  Q32.32. Divide by `2^64` or `2^32` respectively before display.
+- A variance ratio of zero means "no signal", not mean reversion. The controller declines
+  to act on it, and the UI should say so rather than render `0.000`.
+- The page shows a warning while the deployed hook predates the settlement rework. It
+  decides that from the deployment record, by whether the hook's address carries the
+  `BEFORE_SWAP` permission bit, so it cannot claim a fix the deployed bytecode lacks.

@@ -121,7 +121,24 @@ contract VaneHook is IHooks, IUnlockCallback {
     mapping(PoolId => bytes32) internal _aux;
 
     mapping(PoolId => FlowCovState) internal _flowCov;
-    mapping(PoolId => uint128) internal _checkpointLiquidity;
+
+    /// Per-pool state that changes at most once a block, kept apart from the two packed
+    /// words because neither has 32 bits to spare.
+    struct SlowState {
+        /// Liquidity at the last horizon checkpoint; zero until the first one. See
+        /// `_manipulationResistantLiquidity`.
+        uint128 checkpointLiquidity;
+        /// An average of the pool's opening ticks up to the previous block, in 1/256ths of
+        /// a tick, weighting each block by 1/16. See `_offsetAmount` for what it is a
+        /// reference for, and `_advanceBlock` for why it lags by a block.
+        int32 openTickEwmaX8;
+    }
+
+    mapping(PoolId => SlowState) internal _slow;
+
+    /// Weight of each new opening tick in `openTickEwmaX8`, as a right shift: 1/16. A price
+    /// has to be held for about eleven blocks to move the average halfway to it.
+    uint8 private constant OPEN_TICK_EWMA_SHIFT = 4;
     mapping(PoolId => uint64) internal _flowUnitOf;
 
     mapping(PoolId => bool) public allowlisted;
@@ -349,6 +366,12 @@ contract VaneHook is IHooks, IUnlockCallback {
         return PoolStateLib.unpackState(_state[id]).deltaX64;
     }
 
+    /// The slow average of opening ticks that currency0 conversions are bounded against,
+    /// in 1/256ths of a tick.
+    function openTickAverageX8Of(PoolId id) external view returns (int256) {
+        return int256(_slow[id].openTickEwmaX8);
+    }
+
     function kappaOf(PoolId id) external view returns (uint256) {
         return PoolStateLib.unpackAux(_aux[id]).kappaX64;
     }
@@ -415,6 +438,10 @@ contract VaneHook is IHooks, IUnlockCallback {
         a.checkpointTick = tick;
         a.checkpointBlock = uint32(block.number);
         _aux[id] = PoolStateLib.packAux(a);
+
+        // Seeded at the initial price, so the average starts where the pool does rather
+        // than at tick zero. A tick is at most 887,272 in magnitude, so times 256 it fits.
+        _slow[id].openTickEwmaX8 = int32(tick) * 256;
 
         return IHooks.afterInitialize.selector;
     }
@@ -535,6 +562,23 @@ contract VaneHook is IHooks, IUnlockCallback {
 
     function _advanceBlock(PoolId id, PoolState memory s, PoolStateAux memory a) private {
         (uint160 sqrtPriceX96, int24 tickNow,,) = POOL_MANAGER.getSlot0(id);
+
+        {
+            // Folds in the PREVIOUS block's opening tick, still in `s.lastTick` here, and
+            // deliberately not this block's. The average is a reference for currency0
+            // conversions made during this block (see `_offsetAmount`), and this block's
+            // opening price is exactly what someone controlling the boundary can choose.
+            // Folding it in now let that choice move the reference it is checked against:
+            // measured at 0.00014 ether out of the reserve, against 0.138 with no average.
+            // Lagged by a block, a false price has to survive two boundaries to touch the
+            // average and many to move it. Arithmetic shift, so it rounds toward negative
+            // infinity and settles within 1/16 of a tick of a price that holds still.
+            SlowState storage slow = _slow[id];
+            int256 ewma = int256(slow.openTickEwmaX8);
+            ewma += ((int256(s.lastTick) << 8) - ewma) >> OPEN_TICK_EWMA_SHIFT;
+            // Between two values that each fit, so this cannot truncate.
+            slow.openTickEwmaX8 = int32(ewma);
+        }
 
         (uint64 nextVarOne, bool varOneSaturated) =
             HorizonVariance.updateVarOne(s.varOneX32, tickNow, s.lastTick, MAX_TICK_DELTA, VAR_LAMBDA_X32);
@@ -704,8 +748,9 @@ contract VaneHook is IHooks, IUnlockCallback {
 
     function _manipulationResistantLiquidity(PoolId id) private returns (uint128) {
         uint128 liquidityNow = POOL_MANAGER.getLiquidity(id);
-        uint128 liquidityPrev = _checkpointLiquidity[id];
-        _checkpointLiquidity[id] = liquidityNow;
+        SlowState storage slow = _slow[id];
+        uint128 liquidityPrev = slow.checkpointLiquidity;
+        slow.checkpointLiquidity = liquidityNow;
 
         if (liquidityPrev == 0) return 0;
         return liquidityPrev < liquidityNow ? liquidityPrev : liquidityNow;
@@ -789,7 +834,7 @@ contract VaneHook is IHooks, IUnlockCallback {
             if (d == 0) return 0;
         }
 
-        uint256 amount = _offsetAmount(params, delta, d, w, hookTakes);
+        uint256 amount = _offsetAmount(id, params, delta, d, w, hookTakes);
         if (!hookTakes) amount = _feeHaircut(amount, key.fee);
 
         (int128 hookDelta, uint256 shortfall) = _capToReserve(_signedOffset(hookTakes, amount), reserve);
@@ -851,26 +896,55 @@ contract VaneHook is IHooks, IUnlockCallback {
     /// less than the potential it was charged against — measured at 0.093 ether lost on a
     /// twelve-leg loop, with the loss growing in the size of the price excursion.
     ///
-    /// So the conversion uses the price the block opened at, which `beforeSwap` read before
-    /// anything in this block could move it, bounded against the execution rate in the
-    /// hook's favour: the larger of the two amounts when it collects, the smaller when it
-    /// pays. Against the reference the hook is then exact; against the execution rate it
-    /// is never worse. A tick is a floor of the log price, so the reference is read one
-    /// tick on the hook's side of the true opening price.
+    /// So the conversion is bounded by three prices, taking whichever favours the hook: the
+    /// larger currency0 amount when it collects, the smaller when it pays. The swap's own
+    /// rate, so the hook is never worse off than at execution. The price the block opened
+    /// at, which `beforeSwap` read before anything in this block could move it. And a slow
+    /// average of opening prices, because the opening price alone can still be chosen by
+    /// whoever controls the last transaction of one block and the first of the next:
+    /// push the price in block N, hold it across the boundary, harvest in block N+1. That
+    /// was measured at 0.138 ether out of the reserve. The average excludes the current
+    /// block's opening price, so the false price has to be held across many boundaries
+    /// instead of one, each of them open to arbitrage.
+    ///
+    /// The cost lands on honest traders only while the price is genuinely trending, as the
+    /// average lags it: the offset is then overcharged by the offset times the price's
+    /// drift from that average. The bias always favours the reserve. A tick is a floor of the
+    /// log price, so each reference is read on the hook's side of its true value.
     ///
     /// The exponent's sign follows the unspecified currency. A belief `d` scales the price
     /// of currency0 by e^d, so an amount of currency1 scales by e^d and an amount of
     /// currency0 by e^-d — in both directions and both exactness modes. Using e^d for both
     /// mispriced the currency0 quadrants at second order, and in the exact-output sell it
     /// did so in the trader's favour.
-    function _offsetAmount(SwapParams calldata params, BalanceDelta delta, int256 d, Walk memory w, bool hookTakes)
-        private
-        pure
-        returns (uint256)
-    {
+    function _offsetAmount(
+        PoolId id,
+        SwapParams calldata params,
+        BalanceDelta delta,
+        int256 d,
+        Walk memory w,
+        bool hookTakes
+    ) private view returns (uint256) {
         bool unspecifiedIsOne = params.zeroForOne == (params.amountSpecified < 0);
         if (unspecifiedIsOne) return OffsetDelta.offsetAmount(w.walkedWei, d);
-        return OffsetDelta.offsetAmount(_toCurrency0(delta, w, hookTakes), -d);
+        return OffsetDelta.offsetAmount(
+            _toCurrency0(delta, w.walkedWei, _referenceTick(id, w.refTick, hookTakes), hookTakes), -d
+        );
+    }
+
+    /// The reference tick a currency0 conversion is made at: of the block's opening tick
+    /// and the slow average, the lower when the hook collects (a lower price, so more
+    /// currency0) and the higher when it pays, each rounded on the hook's side.
+    function _referenceTick(PoolId id, int24 openTick, bool hookTakes) private view returns (int24) {
+        int256 ewma = int256(_slow[id].openTickEwmaX8);
+        if (hookTakes) {
+            int256 floorEwma = ewma >> 8;
+            return floorEwma < int256(openTick) ? int24(floorEwma) : openTick;
+        }
+        int256 ceilEwma = -((-ewma) >> 8);
+        int256 tick = int256(openTick) + 1;
+        if (ceilEwma > tick) tick = ceilEwma;
+        return tick > int256(TickMath.MAX_TICK) ? TickMath.MAX_TICK : int24(tick);
     }
 
     /// Converts the walked flow into currency0. See `_offsetAmount`.
@@ -879,17 +953,19 @@ contract VaneHook is IHooks, IUnlockCallback {
     /// price above 2^32, so each mulDiv result is below 2^192 and then 2^256; the execution
     /// leg multiplies two int128 magnitudes; and amount1 is nonzero because at least one
     /// whole flow unit was walked.
-    function _toCurrency0(BalanceDelta delta, Walk memory w, bool hookTakes) private pure returns (uint256) {
+    function _toCurrency0(BalanceDelta delta, uint256 walkedWei, int24 refTick, bool hookTakes)
+        private
+        pure
+        returns (uint256)
+    {
         uint256 atExecution;
         unchecked {
-            atExecution = (Q64x64.abs(int256(delta.amount0())) * w.walkedWei) / Q64x64.abs(int256(delta.amount1()));
+            atExecution = (Q64x64.abs(int256(delta.amount0())) * walkedWei) / Q64x64.abs(int256(delta.amount1()));
         }
 
-        int24 tick = w.refTick;
-        if (!hookTakes && tick < TickMath.MAX_TICK) tick += 1;
-        uint160 sqrtRef = TickMath.getSqrtPriceAtTick(tick);
+        uint160 sqrtRef = TickMath.getSqrtPriceAtTick(refTick);
         uint256 atReference =
-            FullMath.mulDiv(FullMath.mulDiv(w.walkedWei, FixedPoint96.Q96, sqrtRef), FixedPoint96.Q96, sqrtRef);
+            FullMath.mulDiv(FullMath.mulDiv(walkedWei, FixedPoint96.Q96, sqrtRef), FixedPoint96.Q96, sqrtRef);
 
         if (hookTakes) return atReference > atExecution ? atReference : atExecution;
         return atReference < atExecution ? atReference : atExecution;

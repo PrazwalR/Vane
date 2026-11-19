@@ -36,6 +36,10 @@ contract IntegrationTest is Test, Deployers {
 
     uint16 internal constant HORIZON_K = 20;
 
+    /// Set from a measurement with about 1% headroom, so a regression fails. See
+    /// test_Gas_WorstCaseCheckpointWithActiveBelief for what it measures.
+    uint256 internal constant GAS_WORST_CASE_BOUND = 56_600;
+
     function setUp() public {
         deployFreshManagerAndRouters();
         deployMintAndApprove2Currencies();
@@ -458,10 +462,18 @@ contract IntegrationTest is Test, Deployers {
         }
     }
 
+    /// The most expensive path a swap can take: a horizon checkpoint and a payout from an
+    /// active belief in the same swap. Happens at most once per `horizonK` blocks, and only
+    /// while the belief is nonzero.
+    ///
+    /// Measured at the pool's SECOND checkpoint, against a control pool with identical
+    /// liquidity. Both choices matter. The first checkpoint takes a cheaper branch, because
+    /// depth is unseeded and the gain short-circuits to zero, and it used to also pay a
+    /// one-time zero-to-nonzero write of the checkpoint liquidity: 20,000 gas that never
+    /// recurs, and which made this figure read 76,172. And the control used to carry twice
+    /// the liquidity of the hook's pool, so the two curves did not do the same work.
     function test_Gas_WorstCaseCheckpointWithActiveBelief() public {
-        modifyLiquidityRouter.modifyLiquidity(plainKey, ModifyLiquidityParams(-60000, 60000, 5000 ether, 0), "");
-
-        for (uint256 i = 0; i < HORIZON_K - 1; i++) {
+        for (uint256 i = 0; i < 2 * HORIZON_K - 1; i++) {
             vm.roll(block.number + 1);
             _swap(true, -5 ether);
             _swapOn(plainKey, true, -5 ether);
@@ -482,14 +494,12 @@ contract IntegrationTest is Test, Deployers {
         console2.log("vane pool, checkpoint + active belief:", vaneGas);
         console2.log("marginal hook cost:", vaneGas - plainGas);
 
-        // Raised from 73,600 (measured 73,362) to 76,500 (measured 76,172) by moving the
-        // block rollover into beforeSwap. That is a second hook call on every swap, about
-        // 3,000 gas, and on this path a second unpack and repack of both state words. It
-        // buys the one price a transaction cannot move — where the block opened — which
-        // currency0 offsets are converted at; without it a single transaction could take
-        // 35 ether out of the reserve. See AtomicHarvest.t.sol.
+        // About 52,000 of this is the hook's own two calls: four storage slots read and
+        // written once a block in beforeSwap, and on this swap the reserve read, target read
+        // and claim burn of a payout in afterSwap. That is a structural floor above the
+        // 45,000 budget for this one path; every ordinary path is well inside it.
         if (GasGuard.assertionsEnabled()) {
-            assertLt(vaneGas - plainGas, 76_500, "worst case must stay within its recorded bound");
+            assertLt(vaneGas - plainGas, GAS_WORST_CASE_BOUND, "worst case must stay within its recorded bound");
         }
     }
 

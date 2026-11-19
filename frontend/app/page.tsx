@@ -121,7 +121,13 @@ const FINDINGS: Finding[] = [
   },
   {
     what:
-      "Whoever controls the last transaction of one block and the first of the next can choose the opening price that currency0 offsets are converted at.",
+      "Whoever controlled the last transaction of one block and the first of the next could choose the opening price that currency0 offsets were converted at: 0.138 ether out of the reserve. Conversions are now also bounded by a slow average of opening prices that excludes the current block's.",
+    severity: "Medium",
+    state: "Fixed",
+  },
+  {
+    what:
+      "A price held off the market for many consecutive blocks still moves that average, at a sixteenth per block. Doing so means standing against arbitrage at every boundary, or building every one of those blocks.",
     severity: null,
     state: "Open",
   },
@@ -268,7 +274,9 @@ export default function Home() {
           Flow is measured in the quote token, so an offset paid in the other token has to be
           converted. It is converted at the price the block <em>opened</em> at, which the
           hook reads before the block&rsquo;s first swap executes, and never at a rate the
-          trader&rsquo;s own transaction produced.
+          trader&rsquo;s own transaction produced. Because whoever controls a block boundary
+          could still pick that opening price, the conversion is also bounded by a slow
+          average of earlier blocks&rsquo; openings, which the current block cannot touch.
         </p>
       </section>
 

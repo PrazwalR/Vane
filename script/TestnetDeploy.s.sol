@@ -8,6 +8,7 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {VaneHook} from "../src/VaneHook.sol";
@@ -16,6 +17,7 @@ import {VaneParameters} from "./VaneParameters.sol";
 
 contract TestnetDeploy is Script {
     using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
 
     address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
@@ -30,6 +32,26 @@ contract TestnetDeploy is Script {
     error TestnetDeploy__AddressMismatch(address expected, address actual);
     error TestnetDeploy__FlagMismatch(uint160 expected, uint160 actual);
 
+    /// Deploys two test tokens, or reuses the pair named by TOKEN0 and TOKEN1 when a
+    /// previous run already deployed them. Mints the deployer a balance either way.
+    function _tokens(address deployer) internal returns (MockERC20 token0, MockERC20 token1) {
+        address given0 = vm.envOr("TOKEN0", address(0));
+        address given1 = vm.envOr("TOKEN1", address(0));
+        MockERC20 tokenA;
+        MockERC20 tokenB;
+        if (given0 != address(0) && given1 != address(0)) {
+            tokenA = MockERC20(given0);
+            tokenB = MockERC20(given1);
+        } else {
+            tokenA = new MockERC20("Vane Test Alpha", "VANE-A", 18);
+            tokenB = new MockERC20("Vane Test Beta", "VANE-B", 18);
+        }
+        (token0, token1) = address(tokenA) < address(tokenB) ? (tokenA, tokenB) : (tokenB, tokenA);
+
+        token0.mint(deployer, 1_000_000 ether);
+        token1.mint(deployer, 1_000_000 ether);
+    }
+
     function run() external {
         uint256 expectedChainId = vm.envUint("EXPECTED_CHAIN_ID");
         if (block.chainid != expectedChainId) revert TestnetDeploy__WrongChain(block.chainid);
@@ -40,12 +62,7 @@ contract TestnetDeploy is Script {
 
         vm.startBroadcast(key);
 
-        MockERC20 tokenA = new MockERC20("Vane Test Alpha", "VANE-A", 18);
-        MockERC20 tokenB = new MockERC20("Vane Test Beta", "VANE-B", 18);
-        (MockERC20 token0, MockERC20 token1) = address(tokenA) < address(tokenB) ? (tokenA, tokenB) : (tokenB, tokenA);
-
-        token0.mint(deployer, 1_000_000 ether);
-        token1.mint(deployer, 1_000_000 ether);
+        (MockERC20 token0, MockERC20 token1) = _tokens(deployer);
 
         bytes memory args = abi.encode(IPoolManager(poolManager), VaneParameters.config(), deployer);
         // A salt mined off chain is used as given; the address and flag checks below still
@@ -63,9 +80,19 @@ contract TestnetDeploy is Script {
             (mined, salt) = HookMiner.find(CREATE2_DEPLOYER, EXPECTED_FLAGS, type(VaneHook).creationCode, args);
         }
 
-        VaneHook hook = new VaneHook{salt: salt}(IPoolManager(poolManager), VaneParameters.config(), deployer);
-
-        if (address(hook) != mined) revert TestnetDeploy__AddressMismatch(mined, address(hook));
+        // Resumable. On a chain whose gas schedule is newer than the one forge simulates,
+        // a run can die part-way with the hook already deployed, and a second `new` at the
+        // same CREATE2 address would revert. Reusing it is sound: the address commits to
+        // the exact init code, so code already there is this hook with this owner, pool
+        // manager and configuration.
+        VaneHook hook;
+        if (mined.code.length == 0) {
+            hook = new VaneHook{salt: salt}(IPoolManager(poolManager), VaneParameters.config(), deployer);
+            if (address(hook) != mined) revert TestnetDeploy__AddressMismatch(mined, address(hook));
+        } else {
+            hook = VaneHook(mined);
+            console2.log("hook already deployed by an earlier run; reusing it");
+        }
 
         uint160 actualFlags = uint160(address(hook)) & HookMiner.FLAG_MASK;
         if (actualFlags != EXPECTED_FLAGS) {
@@ -80,8 +107,11 @@ contract TestnetDeploy is Script {
             hooks: IHooks(address(hook))
         });
 
-        hook.allowPool(poolKey);
-        IPoolManager(poolManager).initialize(poolKey, SQRT_PRICE_1_1);
+        // Both are skipped when an earlier run got that far. Re-allowlisting would not be
+        // harmless on a live pool: it discards the pool's belief.
+        if (!hook.allowlisted(poolKey.toId())) hook.allowPool(poolKey);
+        (uint160 sqrtPriceX96,,,) = IPoolManager(poolManager).getSlot0(poolKey.toId());
+        if (sqrtPriceX96 == 0) IPoolManager(poolManager).initialize(poolKey, SQRT_PRICE_1_1);
 
         vm.stopBroadcast();
 

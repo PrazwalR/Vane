@@ -269,6 +269,94 @@ contract AtomicHarvestTest is Test, Deployers {
         _swapLimited(k, now_ > target, -int256(10_000_000 ether), target);
     }
 
+    /// The residual of converting at the block's opening price: whoever controls the last
+    /// transaction of one block and the first of the next can choose that price. Here the
+    /// attacker pushes the pool up in block N with exact-OUTPUT buys, which are charged
+    /// exactly in currency1, and holds it across the boundary. In block N+1 the opening
+    /// price is the inflated one, so exact-input buys hand the hook currency0 at that rate;
+    /// the belief is then unwound for currency1 and the price put back. Converting at the
+    /// opening price alone lets that pay; anchoring the reference to a slow average of
+    /// opening prices means the false price has to be held for many blocks, not one.
+    function testFuzz_AManipulatedOpeningCannotBeHarvested(
+        uint8 rawTier,
+        uint64 rawKappa,
+        uint96 rawJit,
+        uint16 rawRange,
+        uint96 rawPush,
+        uint96 rawBuild,
+        uint8 rawLegs
+    ) public {
+        Excursion memory e;
+        e.k = keys[bound(rawTier, 0, 2)];
+        int24 spacing = e.k.tickSpacing;
+        e.range = int24(int256(bound(rawRange, 3, 60))) * spacing * 10;
+        e.jit = bound(rawJit, 100_000 ether, 10_000_000 ether);
+        e.build = bound(rawBuild, 1_000 ether, 200_000 ether);
+        e.legs = bound(rawLegs, 1, 20);
+        hook.setKappa(e.k, uint64(bound(rawKappa, 1e4, 1e9)));
+        vm.roll(block.number + 1);
+
+        (e.start,,,) = manager.getSlot0(e.k.toId());
+        Snap memory s0 = _snap();
+        ModifyLiquidityParams memory jit = ModifyLiquidityParams(-e.range, e.range, int256(e.jit), 0);
+        modifyLiquidityRouter.modifyLiquidity(e.k, jit, "");
+
+        uint160 ceiling = TickMath.getSqrtPriceAtTick(e.range - spacing);
+
+        // Block N: push the price up, settling the belief's walk exactly in currency1.
+        _swapLimited(e.k, false, int256(bound(rawPush, 1_000 ether, 200_000 ether)), ceiling);
+
+        // Block N+1 opens at the pushed price.
+        vm.roll(block.number + 1);
+        _swapLimited(e.k, false, -int256(e.build), ceiling);
+        for (uint256 i = 0; i < e.legs; i++) {
+            _swapLimited(e.k, true, -int256(e.build / e.legs), e.start);
+        }
+        _closeAt(e.k, e.start);
+
+        jit.liquidityDelta = -jit.liquidityDelta;
+        modifyLiquidityRouter.modifyLiquidity(e.k, jit, "");
+
+        (int256 attacker, int256 reserve) = _pnl(s0);
+        assertLe(attacker, 0, "a price held across one block boundary must not pay the trader");
+        assertGe(reserve, 0, "and must not shrink the reserve");
+    }
+
+    /// The property the attack above depends on, pinned directly: a price pushed in one
+    /// block and held into the next does not move the reference the next block converts at,
+    /// and once it does enter, it moves the average by a sixteenth.
+    function test_TheReferenceLagsTheOpeningByABlock() public {
+        PoolKey memory k = keys[1];
+        PoolId pid = k.toId();
+
+        // Block N opens at an honest price; record it, then push the price a long way up.
+        vm.roll(block.number + 1);
+        (, int24 openN,,) = manager.getSlot0(pid);
+        _swap(k, false, -5_000 ether);
+        int256 avgN = hook.openTickAverageX8Of(pid);
+        (, int24 pushed,,) = manager.getSlot0(pid);
+        assertGt(pushed, openN + 100, "precondition: the push moved the price");
+
+        // Block N+1 opens at the pushed price. Its rollover folds in block N's opening —
+        // the honest one — so the reference this block converts at has not seen the push.
+        vm.roll(block.number + 1);
+        _swap(k, false, -1 ether);
+        int256 avgN1 = hook.openTickAverageX8Of(pid);
+        assertEq(
+            avgN1, avgN + (((int256(openN) << 8) - avgN) >> 4), "the current opening must not move its own reference"
+        );
+
+        // Block N+2's rollover folds in N+1's opening, which was the pushed price, at a
+        // weight of one sixteenth.
+        vm.roll(block.number + 1);
+        _swap(k, false, -1 ether);
+        assertEq(
+            hook.openTickAverageX8Of(pid),
+            avgN1 + (((int256(pushed) << 8) - avgN1) >> 4),
+            "it enters once a boundary has passed, at a sixteenth"
+        );
+    }
+
     // ------------------------------------------------------------------- helpers
 
     struct Snap {
