@@ -5,6 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {Deployers} from "v4-core-test/utils/Deployers.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {Currency} from "v4-core/types/Currency.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {BalanceDeltaLibrary} from "v4-core/types/BalanceDelta.sol";
 import {BeforeSwapDelta} from "v4-core/types/BeforeSwapDelta.sol";
@@ -16,6 +18,8 @@ import {VaneHookHarness} from "./utils/VaneHookHarness.sol";
 import {Fixtures} from "./utils/Fixtures.sol";
 
 contract AccessControlTest is Test, Deployers {
+    using PoolIdLibrary for PoolKey;
+
     VaneHookHarness internal hook;
     PoolKey internal vaneKey;
 
@@ -91,7 +95,7 @@ contract AccessControlTest is Test, Deployers {
     function test_Revert_SetReserveTargetFromNonOwner() public {
         vm.prank(ATTACKER);
         vm.expectRevert(VaneHook.Vane__NotOwner.selector);
-        hook.setReserveTarget(currency0, 1);
+        hook.setReserveTarget(vaneKey, currency0, 1);
     }
 
     function test_Revert_AllowPoolFromNonOwner() public {
@@ -137,27 +141,47 @@ contract AccessControlTest is Test, Deployers {
     /// payout direction. It is bounded to uint128 to match the configured default's type.
     function test_Revert_ReserveTargetAboveUint128() public {
         vm.expectRevert(VaneHook.Vane__ReserveTargetOutOfRange.selector);
-        hook.setReserveTarget(currency0, uint256(type(uint128).max) + 1);
+        hook.setReserveTarget(vaneKey, currency0, uint256(type(uint128).max) + 1);
     }
 
     /// Zero previously meant "use the default" by way of targetFor, so an operator who
     /// intended a zero target silently got the default instead.
     function test_Revert_ReserveTargetZero() public {
         vm.expectRevert(VaneHook.Vane__ReserveTargetOutOfRange.selector);
-        hook.setReserveTarget(currency0, 0);
+        hook.setReserveTarget(vaneKey, currency0, 0);
     }
 
+    /// The event reports the EFFECTIVE target. Targets are stored as a 24-bit float with a
+    /// 17-bit mantissa, so a target is rounded up by at most one part in 65,536.
     function test_SetReserveTargetAnnouncesItself() public {
-        vm.expectEmit(true, false, false, true, address(hook));
-        emit VaneHook.ReserveTargetSet(currency0, 1234 ether);
-        hook.setReserveTarget(currency0, 1234 ether);
+        vm.expectEmit(true, true, false, false, address(hook));
+        emit VaneHook.ReserveTargetSet(vaneKey.toId(), currency0, 0);
+        hook.setReserveTarget(vaneKey, currency0, 1234 ether);
 
-        assertEq(hook.targetFor(currency0), 1234 ether, "the target must take effect");
+        uint256 effective = hook.targetFor(vaneKey, currency0);
+        assertGe(effective, 1234 ether, "rounding must never lower a target");
+        assertApproxEqRel(effective, 1234 ether, 0.00002e18, "by at most one part in 65,536");
+    }
+
+    /// Exactly representable targets survive unchanged: anything below 2^17, and any
+    /// mantissa below 2^17 times a power of two.
+    function testFuzz_ReserveTargetRoundsUpAndOnlyJustUp(uint128 raw) public {
+        uint256 target = bound(uint256(raw), 1, type(uint128).max);
+        hook.setReserveTarget(vaneKey, currency1, target);
+        uint256 effective = hook.targetFor(vaneKey, currency1);
+        assertGe(effective, target, "never below what was asked for");
+        assertLe(effective - target, target >> 16, "at most one part in 2^16 above it");
+        if (target < 1 << 17) assertEq(effective, target, "small targets are exact");
+    }
+
+    function test_Revert_ReserveTargetForACurrencyNotInThePool() public {
+        vm.expectRevert(VaneHook.Vane__CurrencyNotInPool.selector);
+        hook.setReserveTarget(vaneKey, Currency.wrap(address(0xBEEF)), 1 ether);
     }
 
     function test_Revert_SetReserveTargetIsOwnerOnly() public {
         vm.prank(address(0xBAD));
         vm.expectRevert();
-        hook.setReserveTarget(currency0, 1 ether);
+        hook.setReserveTarget(vaneKey, currency0, 1 ether);
     }
 }

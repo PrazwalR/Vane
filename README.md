@@ -95,22 +95,57 @@ first of the next can choose the opening price itself. Push the pool up in block
 exact-output buys, which settle exactly in currency1, hold the price across the boundary,
 and harvest in block N+1 against an inflated reference. A fuzz campaign found it taking
 0.138 ether out of the reserve. Conversions are now also bounded against a slow average of
-opening prices, weighting each block by 1/16, and the average deliberately excludes the
-current block's opening: folding it in let the attacker move the very reference they were
-checked against, which still leaked 0.00014 ether. Lagged by a block, a false price has to
-survive two boundaries to touch the reference and about a dozen to move it halfway, each
-one open to arbitrage. Honest traders pay for this only while the price genuinely trends:
-a currency0 offset is then sized at a stale price, so it is overcharged by the offset times
-the price's drift from its recent average. The bias always favours the reserve.
+opening prices, and the average deliberately excludes the current block's opening: folding
+it in let the attacker move the very reference they were checked against, which still
+leaked 0.00014 ether.
+
+**Holding a price, against arbitrage.** A slow average can be dragged by holding a false
+price long enough, so the test that matters gives the attacker that chance and charges them
+for it the way a market would: an arbitrageur trades the price back as the first
+transaction of every block, the attacker pushes it up again as the last, for up to 200
+blocks, then harvests with JIT liquidity. Fuzzed over pool depths down to 0.1% of the
+default, it first found an 18.3-ether drain in a shallow pool, where holding a price 22%
+high cost 0.11 ether a block and dragged the average 12% in 61 blocks. The money was not
+in the average. With both references dragged up, a collection fell back to the swap's own
+execution rate, and a 199,000-ether JIT-backed build moved that rate 3.9% for free.
+Three changes close it:
+
+- **Only measured flow is priced.** The belief walk prices at most 2^32 flow units of net
+  flow per block, where the flow variance saturates and the gain is withheld anyway. One
+  block is then worth at most the fee times about 4,295 ether at the default flow unit, a
+  scale the operator sets per pool, rather than whatever JIT liquidity can carry.
+- **The execution-rate fallback is fee-free**, so the fee is not a free part of the error.
+- **The average weights each block by 1/64**, so a false price has to survive about 44
+  consecutive boundaries, each one open to arbitrage, to move it halfway.
+
+With those, 2,000 fuzz runs across depths, tiers, gains and holding periods find nothing,
+and removing the flow bound alone brings the 18.3-ether drain back. Honest traders pay for
+the average only while the price genuinely trends: a currency0 offset is then sized at a
+stale price, overcharged by the offset times the price's drift from its recent average. The
+bias always favours the reserve.
 
 ## Estimating the inputs on chain
 
-Everything is computed inside the hook in integer arithmetic. Ordinary swaps cost the hook
-9,700 gas (no belief) to 24,200 (the first swap of a block), against a 45,000 budget. The
-recorded exception is the once-per-horizon checkpoint with an active belief, at 56,000: four
-storage slots written once a block plus a payout's reserve read and claim burn, which is a
-floor above the budget for that one path. It was reported as 76,200 until the measurement
-was moved off the pool's first checkpoint, which pays a one-time 20,000-gas storage write.
+Everything is computed inside the hook in integer arithmetic, against a budget of 45,000
+gas per swap. Measured with each swap in its own transaction — in one long test
+transaction every slot the setup touched counts as warm, which understated the opening swap
+of a block by almost half — the hook costs:
+
+| Path | Gas |
+|---|---:|
+| Swap, no belief | 20,741 |
+| Swap paid or charged by an active belief | 38,730 |
+| First swap of a block | 30,857 |
+| Horizon checkpoint | 30,851 |
+| Paid first swap of a block, checkpoint due | 44,615 |
+| Checkpoint forced onto a paid swap | 58,547 |
+
+The rollover writes three storage words a block, and everything else on the swap path reads
+one slot of per-pool settings. A checkpoint that falls due on a swap that may be paid waits
+for a later block's opening swap, because the two together exceeded the budget, and the
+wait is bounded at one extra horizon. The last row is the bound being hit: reachable only by
+opening every block for an extra horizon with a swap on the paying side, and paid by the
+swap that forces it.
 
 **Ticks are log prices.** `ln P = tick * ln(1.0001)`, so a tick difference *is* a log
 return up to a constant. Every variance estimate is integer arithmetic — no `ln`, no
@@ -128,11 +163,11 @@ most likely way for this design to look like it works while doing nothing. A reg
 test builds a trending series and asserts the horizon estimate exceeds the per-block one
 by `sqrt(k)`.
 
-**Route B — autocovariance cross-check.** `U^2 = Var(y) - Cov1^2/Cov2`, where the serial
-correlation of informed flow is identified as `rho = Cov2/Cov1` rather than supplied as a
-parameter. Route A is exact only at an informed share of one half, which is what Kyle
-equilibrium predicts; Route B holds more generally. Their divergence measures how far the
-pool sits from the model Route A relies on, and shrinks `kappa` when it is large.
+**Route B, removed.** An autocovariance cross-check, `U^2 = Var(y) - Cov1^2/Cov2`, meant to
+catch Route A misjudging the informed share and shrink the gain when the two disagreed. In
+every regime the replay simulator produced it never identified a noise scale, so all it ever
+did was apply its unidentified penalty, a constant quarter, at 8,000 gas on the first swap
+of every block. It is replaced by that quarter, stated: `gainScaleX32`.
 
 **Route C — variance-ratio control.** Under efficient pricing variance scales linearly
 with horizon, so `VR(k) = Var(r_k)/(k*Var(r_1))` should be 1. The pool measures whether
@@ -143,8 +178,8 @@ model-free: it needs only the definition of an efficient price.
 
 M0 through M5 are implemented and tested: the signed offset and its v4 accounting, both
 variance estimators, depth and open-loop `kappa`, the leaky variance-ratio controller,
-the Route B divergence check, the reserve and its graceful degradation, and a validated
-deploy path. 267 Solidity tests plus 15 covering the replay engine, including fuzz,
+the fixed gain scale that replaced Route B, the reserve and its graceful degradation, and a validated
+deploy path. 264 Solidity tests plus 15 covering the replay engine, including fuzz,
 stateful invariants, threat-model regressions and the audit's reproductions; slither
 reports nothing.
 
@@ -189,9 +224,8 @@ held one swap each way, the measured flow cancelled, and the estimator read near
 against real volatility. Aligning the windows with blocks removed that artifact, which was
 also a way to inflate the gain on purpose, and the warm-ups now trend.
 
-Open, therefore: whether to promote Route B from an attenuator to the primary noise
-estimator, or to make `VR > 4` an explicit precondition and scope the claim to pools that
-genuinely trend. The decay rate `theta` and horizon `K` are still uncalibrated, but there is
+Open, therefore: whether to make `VR > 4` an explicit precondition and scope the claim to
+pools that genuinely trend. The decay rate `theta` and horizon `K` are still uncalibrated, but there is
 now a regime that produces a payout to calibrate them against. Every parameter shipped in
 `script/VaneParameters.sol` is a documented placeholder, not a default.
 
@@ -205,7 +239,6 @@ src/
     Q64x64.sol              fixed point, the tick constants
     DepthLib.sol            D = L*sqrt(P) from live pool state
     FlowVariance.sol        E[y^2] and U                          Route A
-    FlowAutocovariance.sol  lag-1 and lag-2 covariance, rho        Route B
     HorizonVariance.sol     Var(r_1), Var(r_k), sigma, VR
     VarianceRatio.sol       the leaky controller                  Route C
     KappaLib.sol            kappa = lambda* - lambda_amm

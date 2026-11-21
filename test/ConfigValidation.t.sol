@@ -25,27 +25,25 @@ contract ConfigValidationTest is Test {
         return VaneParameters.config();
     }
 
-    /// An unidentifiable Route B must attenuate the gain, which it only does when the
-    /// penalty it stands in for exceeds the divergence the hook already tolerates.
-    /// Otherwise an unavailable cross-check would scale kappa by one and the guard that
-    /// exists to distrust it would be inert.
-    function test_Reverts_UnidentifiedPenaltyBelowTolerance() public {
+    /// The scale may only attenuate. Zero would switch the mechanism off for good, and
+    /// anything above one would amplify a gain that is already Route A's optimistic reading.
+    function test_Reverts_GainScaleZero() public {
         VaneConfig memory c = _cfg();
-        c.unidentifiedPenaltyX32 = c.maxEstimatorDivergenceX32;
-        vm.expectRevert(VaneConfigLib.Vane__UnidentifiedPenaltyTooLow.selector);
+        c.gainScaleX32 = 0;
+        vm.expectRevert(VaneConfigLib.Vane__GainScaleOutOfRange.selector);
         harness.validate(c);
     }
 
-    function test_Reverts_UnidentifiedPenaltyZero() public {
+    function test_Reverts_GainScaleAboveOne() public {
         VaneConfig memory c = _cfg();
-        c.unidentifiedPenaltyX32 = 0;
-        vm.expectRevert(VaneConfigLib.Vane__UnidentifiedPenaltyTooLow.selector);
+        c.gainScaleX32 = uint64(1 << 32) + 1;
+        vm.expectRevert(VaneConfigLib.Vane__GainScaleOutOfRange.selector);
         harness.validate(c);
     }
 
-    function test_Accepts_UnidentifiedPenaltyJustAboveTolerance() public view {
+    function test_Accepts_GainScaleOfOne() public view {
         VaneConfig memory c = _cfg();
-        c.unidentifiedPenaltyX32 = c.maxEstimatorDivergenceX32 + 1;
+        c.gainScaleX32 = uint64(1 << 32);
         harness.validate(c);
     }
 
@@ -117,20 +115,6 @@ contract ConfigValidationTest is Test {
         VaneConfig memory c = _cfg();
         c.reserveTargetDefault = 0;
         vm.expectRevert(VaneConfigLib.Vane__ReserveTargetZero.selector);
-        harness.validate(c);
-    }
-
-    function test_Reverts_MaxDivergenceZero() public {
-        VaneConfig memory c = _cfg();
-        c.maxEstimatorDivergenceX32 = 0;
-        vm.expectRevert(VaneConfigLib.Vane__MaxDivergenceZero.selector);
-        harness.validate(c);
-    }
-
-    function test_Reverts_RouteBZScoreTooLow() public {
-        VaneConfig memory c = _cfg();
-        c.routeBZScore = 1;
-        vm.expectRevert(VaneConfigLib.Vane__RouteBZScoreTooLow.selector);
         harness.validate(c);
     }
 

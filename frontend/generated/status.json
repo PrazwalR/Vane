@@ -1,13 +1,13 @@
 {
-  "generatedAt": "2026-11-19",
-  "tests": 267,
-  "testSuites": 29,
+  "generatedAt": "2026-11-21",
+  "tests": 264,
+  "testSuites": 28,
   "rustTests": 15,
   "statefulInvariants": 7,
-  "runtimeBytes": 21522,
+  "runtimeBytes": 20859,
   "slitherFindings": 0,
-  "lineCoveragePct": 96.15,
-  "branchCoveragePct": 87.88,
-  "worstCaseGasOverhead": 55990,
+  "lineCoveragePct": 95.41,
+  "branchCoveragePct": 89.31,
+  "worstCaseGasOverhead": 58547,
   "gasBudget": 45000
 }

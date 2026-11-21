@@ -105,9 +105,19 @@ contract ReserveSolvencyTest is Test, Deployers {
         console2.log("reserve held    :", hook.reserveOf(currency0));
         console2.log("threshold       :", RESERVE_TARGET * 100);
 
-        // A sell into a positive belief makes the hook PAY in currency0. Past
-        // target/deltaMax the payout exceeds anything the reserve can hold, because the
-        // reserve level cancels out of the scaling.
+        // A sell into a positive belief makes the hook PAY in currency1. One block's payout
+        // is at most the fee times the priced-flow bound — about 12.9 ether here — so a
+        // reserve funded at its 100-ether target cannot be emptied by one swap any more.
+        // The cap below that only bites when the holding is smaller than that payout, so
+        // set that up explicitly: a 1-ether target, so no scaling applies, and 5 ether held.
+        _swap(true, -50_000 ether);
+        assertGt(hook.reserveOf(currency1), 0, "one swap cannot empty a reserve held at its target");
+
+        hook.setBelief(vaneKey, DELTA_MAX);
+        hook.setReserveTarget(vaneKey, currency1, 1 ether);
+        hook.withdrawReserve(currency1, hook.reserveOf(currency1) - 5 ether, address(this));
+        vm.roll(block.number + 1);
+
         uint256 before = hook.reserveOf(currency1);
         _swap(true, -50_000 ether);
         uint256 remaining = hook.reserveOf(currency1);
@@ -237,7 +247,7 @@ contract ReserveSolvencyTest is Test, Deployers {
         // the belief first and _clampBelief dusts it out, so _applyOffset returns before
         // the cap is ever consulted. So: lower the target out of the way, then leave a
         // holding far smaller than the payout a large swap will ask for.
-        hook.setReserveTarget(currency1, 1);
+        hook.setReserveTarget(vaneKey, currency1, 1);
         uint256 held = hook.reserveOf(currency1);
         hook.withdrawReserve(currency1, held - 1 ether, address(this));
         assertEq(hook.reserveOf(currency1), 1 ether, "precondition: holding above target but below the payout");

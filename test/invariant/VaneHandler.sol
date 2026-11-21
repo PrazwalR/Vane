@@ -235,7 +235,7 @@ contract VaneHandler is CommonBase, StdCheats, StdUtils {
         // earlier openings when it collects, so the largest currency0 amount it can size an
         // offset from is the currency1 leg converted at that lower tick.
         int256 refTick = int256(hook.poolState(key.toId()).lastTick);
-        int256 avgFloor = hook.openTickAverageX8Of(key.toId()) >> 8;
+        int256 avgFloor = hook.openTickAverageOf(key.toId()) >> 3;
         if (avgFloor < refTick) refTick = avgFloor;
         uint160 sqrtOpen = TickMath.getSqrtPriceAtTick(int24(refTick));
         uint256 m1In0 = FullMath.mulDiv(FullMath.mulDiv(m1, FixedPoint96.Q96, sqrtOpen), FixedPoint96.Q96, sqrtOpen);

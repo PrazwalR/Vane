@@ -13,6 +13,7 @@ import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {VaneHook} from "../../src/VaneHook.sol";
 import {Fixtures} from "../utils/Fixtures.sol";
+import {VaneConfig} from "../../src/config/VaneConfig.sol";
 
 /// Builds a funded VANE pool alongside a plain control pool on identical liquidity, then
 /// writes the whole EVM state to disk for the Rust replay engine to load.
@@ -31,6 +32,19 @@ contract SimStateDumpTest is Test, Deployers {
     uint64 internal FLOW_UNIT = uint64(vm.envOr("SIM_FLOW_UNIT", uint256(1e15)));
     int24 internal SPACING = int24(int256(vm.envOr("SIM_SPACING", uint256(60))));
 
+    /// Where the dump goes, under sim/state so a sweep can keep one per parameter set.
+    string internal OUT = vm.envOr("SIM_STATE_DIR", string("sim/state"));
+
+    /// The shipped parameters, with the ones a calibration sweep varies taken from the
+    /// environment: the decay rate as a divisor of 2^64, the horizon in blocks, and the
+    /// gain scale as a divisor of 2^32.
+    function _config() internal view returns (VaneConfig memory c) {
+        c = Fixtures.config();
+        c.thetaX64 = uint64(vm.envOr("SIM_THETA_X64", uint256(c.thetaX64)));
+        c.horizonK = uint16(vm.envOr("SIM_HORIZON_K", uint256(c.horizonK)));
+        c.gainScaleX32 = uint64(vm.envOr("SIM_GAIN_SCALE_X32", uint256(c.gainScaleX32)));
+    }
+
     function test_DumpSimState() public {
         deployFreshManagerAndRouters();
         deployMintAndApprove2Currencies();
@@ -40,7 +54,7 @@ contract SimStateDumpTest is Test, Deployers {
                 | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         address hookAddr = address(flags ^ (0x5151 << 144));
-        deployCodeTo("VaneHook.sol:VaneHook", abi.encode(manager, Fixtures.config(), address(this)), hookAddr);
+        deployCodeTo("VaneHook.sol:VaneHook", abi.encode(manager, _config(), address(this)), hookAddr);
         VaneHook hook = VaneHook(payable(hookAddr));
 
         PoolKey memory vaneKey = PoolKey(currency0, currency1, FEE, SPACING, IHooks(hookAddr));
@@ -106,7 +120,7 @@ contract SimStateDumpTest is Test, Deployers {
 
         string memory manifest = string.concat(head, tail);
 
-        vm.writeFile("sim/state/manifest.json", manifest);
-        vm.dumpState("sim/state/state.json");
+        vm.writeFile(string.concat(OUT, "/manifest.json"), manifest);
+        vm.dumpState(string.concat(OUT, "/state.json"));
     }
 }

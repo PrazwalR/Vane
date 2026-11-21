@@ -127,12 +127,24 @@ const FINDINGS: Finding[] = [
   },
   {
     what:
-      "A price held off the market for many consecutive blocks still moves that average, at a sixteenth per block. Doing so means standing against arbitrage at every boundary, or building every one of those blocks.",
-    severity: null,
-    state: "Open",
+      "A price held off the market for tens of blocks dragged that average, and in a shallow pool cheaply: an attacker re-pushing the price at the end of every block against an arbitrageur restoring it took 18.3 ether, harvesting through the swap's own execution rate. Fixed by pricing only the flow the estimator can measure, a fee-free execution rate and a 1/64 average.",
+    severity: "High",
+    state: "Fixed",
   },
   {
-    what: `Worst-case gas is ${status.worstCaseGasOverhead.toLocaleString()} against a ${status.gasBudget.toLocaleString()} budget, on the once-per-horizon checkpoint with an active belief.`,
+    what:
+      "Gas was measured in one long test transaction, where every slot the setup touched counts as warm. The first swap of a block really cost 45,194 against a 45,000 budget, not the 24,246 reported, and the worst case 79,738.",
+    severity: "Medium",
+    state: "Fixed",
+  },
+  {
+    what:
+      "Route B, the autocovariance cross-check, never identified a noise scale in any simulated regime, so it only ever applied a fixed quarter to the gain, at 8,000 gas a block. Removed; the quarter is now a stated parameter.",
+    severity: null,
+    state: "Fixed",
+  },
+  {
+    what: `A checkpoint forced onto a paid swap costs ${status.worstCaseGasOverhead.toLocaleString()} against a ${status.gasBudget.toLocaleString()} budget. Every other path fits; this one is reachable only by opening every block for an extra horizon with a swap on the paying side.`,
     severity: null,
     state: "Open",
   },
@@ -333,7 +345,7 @@ export default function Home() {
 
       <section>
         <p className="eyebrow">Estimation</p>
-        <h2>Three routes, one of which is a control loop</h2>
+        <h2>Two estimators and a control loop</h2>
 
         <h3>Ticks are already log prices</h3>
         <p>
@@ -359,12 +371,12 @@ export default function Home() {
           design to look like it works while doing nothing.
         </p>
 
-        <h3>Route B — autocovariance cross-check</h3>
+        <h3>Route B, removed</h3>
         <p>
-          The serial correlation of informed flow is <em>identified</em> from the ratio of
-          lag-two to lag-one autocovariance rather than supplied as a parameter. Route A is
-          exact only at an informed share of one half; Route B holds more generally, so their
-          divergence measures how far the pool sits from the model Route A relies on.
+          An autocovariance cross-check meant to catch Route A misjudging the informed share.
+          In every simulated regime it never identified a noise scale, so all it ever did was
+          cut the gain to a quarter, at 8,000 gas on the first swap of every block. That
+          quarter is now a stated parameter, and the cross-check is gone.
         </p>
 
         <h3>Route C — variance-ratio control</h3>

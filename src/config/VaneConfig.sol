@@ -30,15 +30,15 @@ struct VaneConfig {
 
     uint128 reserveTargetDefault;
 
-    uint64 maxEstimatorDivergenceX32;
-
-    uint64 routeBZScore;
-    /// Divergence value attributed to Route B when it cannot identify a noise scale at
-    /// all, expressed in X32. Route A's gain is then scaled by
-    /// maxEstimatorDivergenceX32 / this, so a larger value distrusts an unidentifiable
-    /// cross-check more. Must exceed maxEstimatorDivergenceX32, or an unavailable
-    /// cross-check would attenuate nothing.
-    uint64 unidentifiedPenaltyX32;
+    /// A fixed scale on Route A's open-loop gain, in X32: 1/4 is `ONE_X32 / 4`.
+    ///
+    /// This replaces Route B, the autocovariance cross-check, which was meant to catch Route
+    /// A misjudging the informed share and shrink the gain when the two disagreed. In every
+    /// regime the replay simulator produced it never identified a noise scale, so all it
+    /// ever did was apply its unidentified penalty: a constant one quarter. It did that at
+    /// a cost of 8,000 gas on the first swap of every block, which alone put a paid opening
+    /// swap over budget. The quarter is kept, explicitly, so the gain is unchanged.
+    uint64 gainScaleX32;
 }
 
 library VaneConfigLib {
@@ -67,10 +67,7 @@ library VaneConfigLib {
     error Vane__MaxTickDeltaOutOfRange();
     error Vane__FlowUnitOutOfRange();
     error Vane__ReserveTargetZero();
-    error Vane__MaxDivergenceZero();
-    error Vane__RouteBZScoreTooLow();
-
-    error Vane__UnidentifiedPenaltyTooLow();
+    error Vane__GainScaleOutOfRange();
 
     function validate(VaneConfig memory c) internal pure {
         if (c.thetaX64 == 0 || uint256(c.thetaX64) >= ONE_X64) revert Vane__ThetaOutOfRange();
@@ -107,13 +104,9 @@ library VaneConfigLib {
 
         if (c.reserveTargetDefault == 0) revert Vane__ReserveTargetZero();
 
-        if (c.maxEstimatorDivergenceX32 == 0) revert Vane__MaxDivergenceZero();
-
-        if (c.routeBZScore < 2) revert Vane__RouteBZScoreTooLow();
-
-        if (c.unidentifiedPenaltyX32 <= c.maxEstimatorDivergenceX32) {
-            revert Vane__UnidentifiedPenaltyTooLow();
-        }
+        // Zero would switch the mechanism off for good; above one it would amplify a gain
+        // whose estimate is already the optimistic reading of Kyle's model.
+        if (c.gainScaleX32 == 0 || uint256(c.gainScaleX32) > ONE_X32) revert Vane__GainScaleOutOfRange();
     }
 
     function validateFlowUnit(uint64 flowUnit) internal pure {

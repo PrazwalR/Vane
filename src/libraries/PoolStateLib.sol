@@ -22,10 +22,18 @@ struct PoolState {
 
 struct PoolStateAux {
     int24 checkpointTick;
+    /// Stored as its distance below `PoolState.lastBlock`, in 16 bits and saturating, which
+    /// is why packing needs the last block. Every reader only asks how long ago it was, and
+    /// a gap of 65,535 blocks already exceeds any horizon, so saturating loses nothing.
     uint32 checkpointBlock;
     uint64 varKX32;
     uint64 kappaX64;
     int64 flowAccum;
+    /// An average of the pool's opening ticks up to the previous block, in eighths of a
+    /// tick. The reference currency0 conversions are bounded against; see
+    /// `VaneHook._offsetAmount`. It lives here, in a word written once a block anyway,
+    /// because a slot of its own cost 5,000 gas on the first swap of every block.
+    int24 openTickAvgEighths;
 }
 
 library PoolStateLib {
@@ -39,11 +47,6 @@ library PoolStateLib {
     uint256 private constant OFFSET_DELTA = 184;
     uint256 private constant OFFSET_SATURATED = 248;
     uint256 private constant OFFSET_FLOW_UNMEASURABLE = 249;
-
-    uint256 private constant OFFSET_CHECKPOINT_BLOCK = 24;
-    uint256 private constant OFFSET_VAR_K = 56;
-    uint256 private constant OFFSET_KAPPA = 120;
-    uint256 private constant OFFSET_FLOW_ACCUM = 184;
 
     function packState(PoolState memory s) internal pure returns (bytes32 packed) {
         packed = bytes32(
@@ -73,21 +76,38 @@ library PoolStateLib {
         s.flowUnmeasurable = ((raw >> OFFSET_FLOW_UNMEASURABLE) & 1) == 1;
     }
 
-    function packAux(PoolStateAux memory a) internal pure returns (bytes32 packed) {
+    uint256 private constant MASK_16 = 0xFFFF;
+    uint256 private constant OFFSET_CHECKPOINT_AGE = 24;
+    uint256 private constant OFFSET_VAR_K_AUX = 40;
+    uint256 private constant OFFSET_KAPPA_AUX = 104;
+    uint256 private constant OFFSET_FLOW_ACCUM_AUX = 168;
+    uint256 private constant OFFSET_OPEN_TICK_AVG = 232;
+
+    function packAux(PoolStateAux memory a, uint32 lastBlock) internal pure returns (bytes32 packed) {
+        uint256 age;
+        unchecked {
+            // Wrapping subtraction, matching how both blocks are truncated to 32 bits.
+            age = uint256(uint32(lastBlock - a.checkpointBlock));
+        }
+        if (age > MASK_16) age = MASK_16;
         packed = bytes32(
-            (uint256(uint24(a.checkpointTick)) & MASK_24)
-                | ((uint256(a.checkpointBlock) & MASK_32) << OFFSET_CHECKPOINT_BLOCK)
-                | ((uint256(a.varKX32) & MASK_64) << OFFSET_VAR_K) | ((uint256(a.kappaX64) & MASK_64) << OFFSET_KAPPA)
-                | ((uint256(uint64(a.flowAccum)) & MASK_64) << OFFSET_FLOW_ACCUM)
+            (uint256(uint24(a.checkpointTick)) & MASK_24) | (age << OFFSET_CHECKPOINT_AGE)
+                | ((uint256(a.varKX32) & MASK_64) << OFFSET_VAR_K_AUX)
+                | ((uint256(a.kappaX64) & MASK_64) << OFFSET_KAPPA_AUX)
+                | ((uint256(uint64(a.flowAccum)) & MASK_64) << OFFSET_FLOW_ACCUM_AUX)
+                | ((uint256(uint24(a.openTickAvgEighths)) & MASK_24) << OFFSET_OPEN_TICK_AVG)
         );
     }
 
-    function unpackAux(bytes32 packed) internal pure returns (PoolStateAux memory a) {
+    function unpackAux(bytes32 packed, uint32 lastBlock) internal pure returns (PoolStateAux memory a) {
         uint256 raw = uint256(packed);
         a.checkpointTick = int24(uint24(raw & MASK_24));
-        a.checkpointBlock = uint32((raw >> OFFSET_CHECKPOINT_BLOCK) & MASK_32);
-        a.varKX32 = uint64((raw >> OFFSET_VAR_K) & MASK_64);
-        a.kappaX64 = uint64((raw >> OFFSET_KAPPA) & MASK_64);
-        a.flowAccum = int64(uint64((raw >> OFFSET_FLOW_ACCUM) & MASK_64));
+        unchecked {
+            a.checkpointBlock = lastBlock - uint32((raw >> OFFSET_CHECKPOINT_AGE) & MASK_16);
+        }
+        a.varKX32 = uint64((raw >> OFFSET_VAR_K_AUX) & MASK_64);
+        a.kappaX64 = uint64((raw >> OFFSET_KAPPA_AUX) & MASK_64);
+        a.flowAccum = int64(uint64((raw >> OFFSET_FLOW_ACCUM_AUX) & MASK_64));
+        a.openTickAvgEighths = int24(uint24((raw >> OFFSET_OPEN_TICK_AVG) & MASK_24));
     }
 }

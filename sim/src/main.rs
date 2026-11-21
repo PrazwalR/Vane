@@ -37,6 +37,10 @@ struct Args {
     /// Print the hook's internal state every N blocks.
     #[arg(long, default_value_t = 0)]
     trace: usize,
+    /// Directory holding the dumped `state.json` and `manifest.json`, so several dumps
+    /// (one per parameter set) can be replayed side by side.
+    #[arg(long, default_value = "state")]
+    state: String,
 }
 
 struct Pool {
@@ -161,7 +165,10 @@ fn reserve(h: &mut Harness, hook: Address, currency: Address) -> f64 {
 
 fn main() {
     let args = Args::parse();
-    let mut h = Harness::load("state/state.json", "state/manifest.json");
+    let mut h = Harness::load(
+        &format!("{}/state.json", args.state),
+        &format!("{}/manifest.json", args.state),
+    );
 
     let hook = h.manifest.vane_hook;
     let (c0, c1) = (h.manifest.currency0, h.manifest.currency1);
@@ -270,22 +277,14 @@ fn main() {
                 .view(hook, poolStateCall { id }.abi_encode())
                 .ok()
                 .and_then(|b| poolStateCall::abi_decode_returns(&b, false).ok());
-            let cv = h
-                .view(hook, flowCovOfCall { id }.abi_encode())
-                .ok()
-                .and_then(|b| flowCovOfCall::abi_decode_returns(&b, false).ok());
 
             let (var1, fvar, sat) = match &st {
                 Some(r) => (r._0.varOneX32, r._0.flowVarUnitsSq, r._0.saturated),
                 None => (0, 0, false),
             };
-            let (cov1, cov2) = match &cv {
-                Some(r) => (r._0.cov1, r._0.cov2),
-                None => (0, 0),
-            };
             println!(
-                "blk {:>5} kappa={:<12} belief={:<12} varOne={:<12} flowVar={:<18} cov1={:<14} cov2={:<14} sat={:<5} tick={}",
-                block_i, kappa, belief, var1, fvar, cov1, cov2, sat,
+                "blk {:>5} kappa={:<12} belief={:<12} varOne={:<12} flowVar={:<18} sat={:<5} tick={}",
+                block_i, kappa, belief, var1, fvar, sat,
                 pools[0].ticks.last().unwrap()
             );
         }

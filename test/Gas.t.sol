@@ -66,6 +66,7 @@ contract GasTest is Test, Deployers {
         gasUsed = before - gasleft();
     }
 
+    /// forge-config: default.isolate = true
     function test_Gas_ZeroBeliefPath() public {
         _measure(plainKey);
         _measure(vaneKey);
@@ -82,6 +83,7 @@ contract GasTest is Test, Deployers {
         }
     }
 
+    /// forge-config: default.isolate = true
     function test_Gas_ActiveBeliefPath() public {
         _measure(plainKey);
         hook.setBelief(vaneKey, DELTA_100BPS);

@@ -27,7 +27,6 @@ import {HorizonVariance} from "./libraries/HorizonVariance.sol";
 import {FlowVariance} from "./libraries/FlowVariance.sol";
 import {VarianceRatio, ControllerParams} from "./libraries/VarianceRatio.sol";
 import {PoolStateLib, PoolState, PoolStateAux} from "./libraries/PoolStateLib.sol";
-import {FlowAutocovariance, FlowCovState} from "./libraries/FlowAutocovariance.sol";
 import {VaneConfig, VaneConfigLib} from "./config/VaneConfig.sol";
 
 contract VaneHook is IHooks, IUnlockCallback {
@@ -43,6 +42,7 @@ contract VaneHook is IHooks, IUnlockCallback {
     error Vane__NativeValueMismatch();
 
     error Vane__ReserveTargetOutOfRange();
+    error Vane__CurrencyNotInPool();
 
     /// The payout bound and the payout haircut are both priced from `key.fee`. For a
     /// dynamic-fee pool that field is a flag, not a fee — 0x800000, read as 838% — while
@@ -57,8 +57,6 @@ contract VaneHook is IHooks, IUnlockCallback {
     error Vane__UnexpectedNativeValue();
 
     event BeliefUpdated(PoolId indexed poolId, int256 deltaX64, uint256 kappaX64, uint256 varianceRatioX32);
-
-    event EstimatorDivergence(PoolId indexed poolId, uint256 noiseA, uint256 noiseB, uint256 divergenceX32);
 
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -79,7 +77,7 @@ contract VaneHook is IHooks, IUnlockCallback {
     /// until an operator re-allowlists the pool with a smaller one.
     event FlowUnmeasurable(PoolId indexed id, uint256 notional, uint64 flowUnit);
 
-    event ReserveTargetSet(Currency indexed currency, uint256 target);
+    event ReserveTargetSet(PoolId indexed id, Currency indexed currency, uint256 target);
 
     event PayoutTruncated(PoolId indexed id, Currency indexed currency, uint256 owed, uint256 available);
 
@@ -106,44 +104,33 @@ contract VaneHook is IHooks, IUnlockCallback {
     int24 private immutable MAX_TICK_DELTA;
     uint64 private immutable FLOW_UNIT;
     uint128 private immutable RESERVE_TARGET_DEFAULT;
-    uint64 private immutable MAX_DIVERGENCE_X32;
-    uint64 private immutable ROUTE_B_Z_SCORE;
-
-    uint64 private immutable UNIDENTIFIED_PENALTY_X32;
-
-    /// Route B's identification threshold. Both of its inputs are immutable, so it is a
-    /// constant of the deployment — it was being recomputed, square root included, on
-    /// every horizon step.
-    uint256 private immutable MIN_COV_RATIO_X32;
+    uint64 private immutable GAIN_SCALE_X32;
 
     mapping(PoolId => bytes32) internal _state;
 
     mapping(PoolId => bytes32) internal _aux;
 
-    mapping(PoolId => FlowCovState) internal _flowCov;
-
-    /// Per-pool state that changes at most once a block, kept apart from the two packed
-    /// words because neither has 32 bits to spare.
-    struct SlowState {
+    /// Per-pool settings, in one slot because the swap path reads them together: every swap
+    /// reads the flow unit, every swap that walks a belief reads the allowlist, and every
+    /// payout reads the reserve target. As three mappings that was three cold reads.
+    struct PoolSettings {
+        /// Wei of currency1 per flow unit; zero means the configured default.
+        uint64 flowUnit;
+        bool allowlisted;
         /// Liquidity at the last horizon checkpoint; zero until the first one. See
         /// `_manipulationResistantLiquidity`.
         uint128 checkpointLiquidity;
-        /// An average of the pool's opening ticks up to the previous block, in 1/256ths of
-        /// a tick, weighting each block by 1/16. See `_offsetAmount` for what it is a
-        /// reference for, and `_advanceBlock` for why it lags by a block.
-        int32 openTickEwmaX8;
+        /// Reserve targets for currency0 and currency1 payouts, compressed; zero means the
+        /// configured default. See `_packTarget`.
+        uint24 target0;
+        uint24 target1;
     }
 
-    mapping(PoolId => SlowState) internal _slow;
+    mapping(PoolId => PoolSettings) internal _settings;
 
-    /// Weight of each new opening tick in `openTickEwmaX8`, as a right shift: 1/16. A price
-    /// has to be held for about eleven blocks to move the average halfway to it.
-    uint8 private constant OPEN_TICK_EWMA_SHIFT = 4;
-    mapping(PoolId => uint64) internal _flowUnitOf;
-
-    mapping(PoolId => bool) public allowlisted;
-
-    mapping(Currency => uint256) public reserveTargetOf;
+    /// Weight of each opening tick in the average, as a right shift: 1/64. A false price has
+    /// to survive about 44 consecutive block boundaries to move the average halfway to it.
+    uint8 private constant OPEN_TICK_AVG_SHIFT = 6;
 
     modifier onlyPoolManager() {
         if (msg.sender != address(POOL_MANAGER)) revert Vane__NotPoolManager();
@@ -201,10 +188,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         MAX_TICK_DELTA = vaneConfig.maxTickDelta;
         FLOW_UNIT = vaneConfig.flowUnit;
         RESERVE_TARGET_DEFAULT = vaneConfig.reserveTargetDefault;
-        MAX_DIVERGENCE_X32 = vaneConfig.maxEstimatorDivergenceX32;
-        ROUTE_B_Z_SCORE = vaneConfig.routeBZScore;
-        UNIDENTIFIED_PENALTY_X32 = vaneConfig.unidentifiedPenaltyX32;
-        MIN_COV_RATIO_X32 = FlowAutocovariance.minCovRatioX32(vaneConfig.flowLambdaX32, vaneConfig.routeBZScore);
+        GAIN_SCALE_X32 = vaneConfig.gainScaleX32;
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -241,8 +225,9 @@ contract VaneHook is IHooks, IUnlockCallback {
     }
 
     function _allowPool(PoolId id, uint64 poolFlowUnit) private {
-        allowlisted[id] = true;
-        _flowUnitOf[id] = poolFlowUnit;
+        PoolSettings storage settings = _settings[id];
+        settings.allowlisted = true;
+        settings.flowUnit = poolFlowUnit;
         emit PoolAllowed(id, poolFlowUnit);
 
         // Re-allowlisting is how an operator corrects a flow unit that was too small for
@@ -274,21 +259,25 @@ contract VaneHook is IHooks, IUnlockCallback {
         // would still be paid out to whoever reverses it after this call lands. That is a
         // sandwich on the operator's own transaction. The price is one partial per-block
         // flow sample, once per allowlisting.
-        PoolStateAux memory ax = PoolStateLib.unpackAux(_aux[id]);
+        PoolStateAux memory ax = PoolStateLib.unpackAux(_aux[id], st.lastBlock);
         if (ax.flowAccum != 0) {
             ax.flowAccum = 0;
-            _aux[id] = PoolStateLib.packAux(ax);
+            _aux[id] = PoolStateLib.packAux(ax, st.lastBlock);
         }
     }
 
     function disallowPool(PoolKey calldata key) external onlyOwner {
         PoolId id = key.toId();
-        allowlisted[id] = false;
+        _settings[id].allowlisted = false;
         emit PoolDisallowed(id);
     }
 
+    function allowlisted(PoolId id) external view returns (bool) {
+        return _settings[id].allowlisted;
+    }
+
     function flowUnitOf(PoolId id) public view returns (uint64) {
-        uint64 unit = _flowUnitOf[id];
+        uint64 unit = _settings[id].flowUnit;
         return unit == 0 ? FLOW_UNIT : unit;
     }
 
@@ -347,19 +336,52 @@ contract VaneHook is IHooks, IUnlockCallback {
     /// above 2^255, an int256 cast that reinterprets the target as negative and inverts
     /// the payout direction. Zero is rejected rather than silently meaning "use the
     /// default", which is what targetFor would otherwise do with it.
-    function setReserveTarget(Currency currency, uint256 target) external onlyOwner {
+    ///
+    /// Set per pool rather than per currency, so the payout path reads it from the slot it
+    /// already holds for the flow unit and allowlist instead of a mapping of its own: a cold
+    /// read that cost 2,200 gas on every payout. Stored compressed and rounded UP, so the
+    /// effective target is never below the one asked for, and reported by the event.
+    function setReserveTarget(PoolKey calldata key, Currency currency, uint256 target) external onlyOwner {
         if (target == 0 || target > type(uint128).max) revert Vane__ReserveTargetOutOfRange();
-        reserveTargetOf[currency] = target;
-        emit ReserveTargetSet(currency, target);
+        PoolId id = key.toId();
+        PoolSettings storage settings = _settings[id];
+        uint24 packed = _packTarget(target);
+        if (Currency.unwrap(currency) == Currency.unwrap(key.currency0)) settings.target0 = packed;
+        else if (Currency.unwrap(currency) == Currency.unwrap(key.currency1)) settings.target1 = packed;
+        else revert Vane__CurrencyNotInPool();
+        emit ReserveTargetSet(id, currency, _unpackTarget(packed));
     }
 
     function reserveOf(Currency currency) public view returns (uint256) {
         return POOL_MANAGER.balanceOf(address(this), currency.toId());
     }
 
-    function targetFor(Currency currency) public view returns (uint256) {
-        uint256 override_ = reserveTargetOf[currency];
-        return override_ == 0 ? uint256(RESERVE_TARGET_DEFAULT) : override_;
+    function targetFor(PoolKey calldata key, Currency currency) external view returns (uint256) {
+        PoolSettings storage settings = _settings[key.toId()];
+        if (Currency.unwrap(currency) == Currency.unwrap(key.currency0)) return _targetOf(settings.target0);
+        if (Currency.unwrap(currency) == Currency.unwrap(key.currency1)) return _targetOf(settings.target1);
+        revert Vane__CurrencyNotInPool();
+    }
+
+    function _targetOf(uint24 packed) private view returns (uint256) {
+        return packed == 0 ? uint256(RESERVE_TARGET_DEFAULT) : _unpackTarget(packed);
+    }
+
+    /// A target as a 24-bit float: a 7-bit exponent over a 17-bit mantissa, rounded up. That
+    /// is within one part in 65,536 of the target asked for, and covers every uint128.
+    function _packTarget(uint256 target) private pure returns (uint24) {
+        uint256 exponent;
+        uint256 mantissa = target;
+        while (mantissa >= 1 << 17) {
+            // Round up: carry any bit shifted out.
+            mantissa = (mantissa >> 1) + (mantissa & 1);
+            exponent++;
+        }
+        return uint24((exponent << 17) | mantissa);
+    }
+
+    function _unpackTarget(uint24 packed) private pure returns (uint256) {
+        return uint256(packed & 0x1FFFF) << (packed >> 17);
     }
 
     function beliefOf(PoolId id) external view returns (int256) {
@@ -367,13 +389,13 @@ contract VaneHook is IHooks, IUnlockCallback {
     }
 
     /// The slow average of opening ticks that currency0 conversions are bounded against,
-    /// in 1/256ths of a tick.
-    function openTickAverageX8Of(PoolId id) external view returns (int256) {
-        return int256(_slow[id].openTickEwmaX8);
+    /// in eighths of a tick.
+    function openTickAverageOf(PoolId id) external view returns (int256) {
+        return int256(PoolStateLib.unpackAux(_aux[id], 0).openTickAvgEighths);
     }
 
     function kappaOf(PoolId id) external view returns (uint256) {
-        return PoolStateLib.unpackAux(_aux[id]).kappaX64;
+        return PoolStateLib.unpackAux(_aux[id], 0).kappaX64;
     }
 
     function config() external view returns (VaneConfig memory) {
@@ -391,14 +413,8 @@ contract VaneHook is IHooks, IUnlockCallback {
             maxTickDelta: MAX_TICK_DELTA,
             flowUnit: FLOW_UNIT,
             reserveTargetDefault: RESERVE_TARGET_DEFAULT,
-            maxEstimatorDivergenceX32: MAX_DIVERGENCE_X32,
-            routeBZScore: ROUTE_B_Z_SCORE,
-            unidentifiedPenaltyX32: UNIDENTIFIED_PENALTY_X32
+            gainScaleX32: GAIN_SCALE_X32
         });
-    }
-
-    function flowCovOf(PoolId id) external view returns (FlowCovState memory) {
-        return _flowCov[id];
     }
 
     function poolState(PoolId id) external view returns (PoolState memory) {
@@ -406,7 +422,7 @@ contract VaneHook is IHooks, IUnlockCallback {
     }
 
     function poolStateAux(PoolId id) external view returns (PoolStateAux memory) {
-        return PoolStateLib.unpackAux(_aux[id]);
+        return PoolStateLib.unpackAux(_aux[id], PoolStateLib.lastBlockOf(_state[id]));
     }
 
     function beforeInitialize(address, PoolKey calldata key, uint160)
@@ -416,7 +432,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         onlyPoolManager
         returns (bytes4)
     {
-        if (!allowlisted[key.toId()]) revert Vane__PoolNotAllowlisted();
+        if (!_settings[key.toId()].allowlisted) revert Vane__PoolNotAllowlisted();
         if (LPFeeLibrary.isDynamicFee(key.fee)) revert Vane__DynamicFeeUnsupported();
         return IHooks.beforeInitialize.selector;
     }
@@ -437,11 +453,11 @@ contract VaneHook is IHooks, IUnlockCallback {
         PoolStateAux memory a;
         a.checkpointTick = tick;
         a.checkpointBlock = uint32(block.number);
-        _aux[id] = PoolStateLib.packAux(a);
-
         // Seeded at the initial price, so the average starts where the pool does rather
-        // than at tick zero. A tick is at most 887,272 in magnitude, so times 256 it fits.
-        _slow[id].openTickEwmaX8 = int32(tick) * 256;
+        // than at tick zero. A tick is at most 887,272 in magnitude, so in eighths it fits
+        // an int24 with room to spare.
+        a.openTickAvgEighths = tick * 8;
+        _aux[id] = PoolStateLib.packAux(a, uint32(block.number));
 
         return IHooks.afterInitialize.selector;
     }
@@ -458,7 +474,7 @@ contract VaneHook is IHooks, IUnlockCallback {
     /// Running here, the tick read is the price the previous block ended at. Nothing in the
     /// current block can move it, and it is what currency0 offsets are converted at for the
     /// rest of the block. See `_offsetAmount`.
-    function beforeSwap(address, PoolKey calldata key, SwapParams calldata, bytes calldata)
+    function beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata)
         external
         override
         onlyPoolManager
@@ -468,10 +484,10 @@ contract VaneHook is IHooks, IUnlockCallback {
         bytes32 word = _state[id];
         if (uint32(block.number) != PoolStateLib.lastBlockOf(word)) {
             PoolState memory s = PoolStateLib.unpackState(word);
-            PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id]);
-            _advanceBlock(id, s, a);
+            PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id], s.lastBlock);
+            _advanceBlock(id, s, a, params.zeroForOne);
             _state[id] = PoolStateLib.packState(s);
-            _aux[id] = PoolStateLib.packAux(a);
+            _aux[id] = PoolStateLib.packAux(a, s.lastBlock);
         }
         return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
@@ -485,6 +501,25 @@ contract VaneHook is IHooks, IUnlockCallback {
         return (IHooks.afterSwap.selector, _recordSwap(key, params, delta));
     }
 
+    /// The most net flow in a block, in flow units, that the belief walk prices: 2^32, where
+    /// the flow variance saturates. Beyond it the estimator has stopped measuring and the
+    /// gain is withheld at the next checkpoint, so flow there is unmeasured, and unmeasured
+    /// flow now walks nothing and pays nothing. That bounds what one block can be worth to
+    /// anyone, at a scale the operator sets through the flow unit: a harvest that used to be
+    /// priced on 199,000 ether of JIT-backed flow is priced on 4,295 at the default unit.
+    int256 private constant PRICED_FLOW_BOUND = int256(1) << 32;
+
+    function _priced(int64 accum) private pure returns (int256 v) {
+        v = int256(accum);
+        // One unsigned comparison for the common case: v + B lies in [0, 2B] exactly when
+        // |v| <= B. An int64 plus 2^32 cannot overflow.
+        unchecked {
+            if (uint256(v + PRICED_FLOW_BOUND) > uint256(2 * PRICED_FLOW_BOUND)) {
+                v = v > 0 ? PRICED_FLOW_BOUND : -PRICED_FLOW_BOUND;
+            }
+        }
+    }
+
     /// One swap's walk of the belief: the unclamped belief before and after its own flow,
     /// that flow in wei of currency1, and the tick the block opened at.
     struct Walk {
@@ -492,6 +527,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         int256 x1;
         uint256 walkedWei;
         int24 refTick;
+        int24 refAvgEighths;
     }
 
     function _recordSwap(PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
@@ -500,9 +536,10 @@ contract VaneHook is IHooks, IUnlockCallback {
     {
         PoolId id = key.toId();
         PoolState memory s = PoolStateLib.unpackState(_state[id]);
-        PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id]);
+        PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id], s.lastBlock);
 
         uint64 unit = flowUnitOf(id);
+        bool stateChanged;
         int64 accumBefore = a.flowAccum;
         {
             int256 magnitude1 = int256(Q64x64.abs(int256(delta.amount1())));
@@ -521,12 +558,16 @@ contract VaneHook is IHooks, IUnlockCallback {
             // condition diagnosable.
             if (flowUnits == 0 && magnitude1 != 0 && !s.flowUnmeasurable) {
                 s.flowUnmeasurable = true;
+                stateChanged = true;
                 emit FlowUnmeasurable(id, uint256(magnitude1), unit);
             }
 
             (int64 nextAccum, bool accumSaturated) = FlowVariance.accumulateChecked(a.flowAccum, flowUnits);
             a.flowAccum = nextAccum;
-            if (accumSaturated) s.saturated = true;
+            if (accumSaturated && !s.saturated) {
+                s.saturated = true;
+                stateChanged = true;
+            }
         }
 
         // With no belief and no gain the walk is identically zero and there is nothing to
@@ -546,39 +587,31 @@ contract VaneHook is IHooks, IUnlockCallback {
             Walk memory w;
             unchecked {
                 int256 kappa = int256(uint256(a.kappaX64));
-                w.x0 = int256(s.deltaX64) + kappa * int256(accumBefore);
-                w.x1 = int256(s.deltaX64) + kappa * int256(a.flowAccum);
-                w.walkedWei = Q64x64.abs(int256(a.flowAccum) - int256(accumBefore)) * uint256(unit);
+                int256 pricedBefore = _priced(accumBefore);
+                int256 pricedAfter = _priced(a.flowAccum);
+                w.x0 = int256(s.deltaX64) + kappa * pricedBefore;
+                w.x1 = int256(s.deltaX64) + kappa * pricedAfter;
+                w.walkedWei = Q64x64.abs(pricedAfter - pricedBefore) * uint256(unit);
             }
             // beforeSwap has already rolled the block, so this is the tick the previous
             // block ended at, fixed for every swap in this one.
             w.refTick = s.lastTick;
+            w.refAvgEighths = a.openTickAvgEighths;
             hookDeltaUnspecified = _applyOffset(id, key, params, delta, w);
         }
 
-        _state[id] = PoolStateLib.packState(s);
-        _aux[id] = PoolStateLib.packAux(a);
+        // The state word changes here only when one of its two flags is first raised, so it is
+        // rewritten only then; every swap paid to repack and store an unchanged word.
+        if (stateChanged) _state[id] = PoolStateLib.packState(s);
+        _aux[id] = PoolStateLib.packAux(a, s.lastBlock);
     }
 
-    function _advanceBlock(PoolId id, PoolState memory s, PoolStateAux memory a) private {
-        (uint160 sqrtPriceX96, int24 tickNow,,) = POOL_MANAGER.getSlot0(id);
+    /// Horizon checkpoints are postponed past a swap that may be paid, but never by more
+    /// than this many blocks beyond the horizon itself. See `_advanceBlock`.
+    uint256 private constant MAX_CHECKPOINT_DEFERRAL_HORIZONS = 1;
 
-        {
-            // Folds in the PREVIOUS block's opening tick, still in `s.lastTick` here, and
-            // deliberately not this block's. The average is a reference for currency0
-            // conversions made during this block (see `_offsetAmount`), and this block's
-            // opening price is exactly what someone controlling the boundary can choose.
-            // Folding it in now let that choice move the reference it is checked against:
-            // measured at 0.00014 ether out of the reserve, against 0.138 with no average.
-            // Lagged by a block, a false price has to survive two boundaries to touch the
-            // average and many to move it. Arithmetic shift, so it rounds toward negative
-            // infinity and settles within 1/16 of a tick of a price that holds still.
-            SlowState storage slow = _slow[id];
-            int256 ewma = int256(slow.openTickEwmaX8);
-            ewma += ((int256(s.lastTick) << 8) - ewma) >> OPEN_TICK_EWMA_SHIFT;
-            // Between two values that each fit, so this cannot truncate.
-            slow.openTickEwmaX8 = int32(ewma);
-        }
+    function _advanceBlock(PoolId id, PoolState memory s, PoolStateAux memory a, bool zeroForOne) private {
+        (uint160 sqrtPriceX96, int24 tickNow,,) = POOL_MANAGER.getSlot0(id);
 
         (uint64 nextVarOne, bool varOneSaturated) =
             HorizonVariance.updateVarOne(s.varOneX32, tickNow, s.lastTick, MAX_TICK_DELTA, VAR_LAMBDA_X32);
@@ -605,7 +638,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         }
         a.flowAccum = 0;
 
-        _flowCov[id] = FlowAutocovariance.update(_flowCov[id], blockFlow, FLOW_LAMBDA_X32);
+        a.openTickAvgEighths = _foldOpening(a.openTickAvgEighths, s.lastTick);
 
         // Commit the belief the window's swaps walked to, at the gain they were priced at,
         // and only then decay it. The order matters for the liability: decaying first and
@@ -623,7 +656,7 @@ contract VaneHook is IHooks, IUnlockCallback {
             : int64(
                 BeliefState.decay(
                     BeliefState.update(
-                        s.deltaX64, int256(uint256(a.kappaX64)), int256(blockFlow), int256(uint256(DELTA_MAX_X64))
+                        s.deltaX64, int256(uint256(a.kappaX64)), _priced(blockFlow), int256(uint256(DELTA_MAX_X64))
                     ),
                     THETA_X64
                 )
@@ -631,18 +664,36 @@ contract VaneHook is IHooks, IUnlockCallback {
         s.lastTick = tickNow;
         s.lastBlock = uint32(block.number);
 
-        uint256 vrX32;
-        if (_blocksSinceCheckpoint(a.checkpointBlock) >= HORIZON_K) {
+        if (_horizonDue(a.checkpointBlock, s.deltaX64, zeroForOne)) {
             uint64 kappaBefore = a.kappaX64;
-            vrX32 = _stepHorizon(id, s, a, tickNow, sqrtPriceX96);
+            uint256 vrX32 = _stepHorizon(id, s, a, tickNow, sqrtPriceX96);
             // A gain that falls must take the belief down with it, or the belief stops
             // walking back as fast as it was built and the reserve owes the difference.
             // At a gain of zero — which the saturation gate installs on purpose — it
             // stops walking back at all. `revise` never widens, so the cast is safe.
             s.deltaX64 = int64(BeliefState.revise(s.deltaX64, a.kappaX64, kappaBefore));
-        }
 
-        emit BeliefUpdated(id, s.deltaX64, a.kappaX64, vrX32);
+            // Emitted at checkpoints, where the gain is set, rather than every block. Between
+            // them the belief moves only by the committed walk and a fixed decay, both
+            // recoverable from `beliefOf`, and the per-block log cost 2,000 gas on the first
+            // swap of every block — enough on its own to put a paid opening swap over budget.
+            emit BeliefUpdated(id, s.deltaX64, a.kappaX64, vrX32);
+        }
+    }
+
+    /// Folds the PREVIOUS block's opening tick into the average, and deliberately not this
+    /// block's. The average is a reference for currency0 conversions made during this block
+    /// (see `_offsetAmount`), and this block's opening price is exactly what someone
+    /// controlling the boundary can choose. Folding it in let that choice move the reference
+    /// it is checked against: measured at 0.00014 ether out of the reserve, against 0.138
+    /// with no average. Lagged by a block, a false price has to survive two boundaries to
+    /// touch the average, and at a weight of 1/64 about 44 consecutive ones to move it
+    /// halfway. Rounded to nearest, so it settles within four ticks of a price that holds
+    /// still; the result lies between two values that each fit, so it cannot truncate.
+    function _foldOpening(int24 avgEighths, int24 previousOpen) private pure returns (int24) {
+        int256 avg = int256(avgEighths);
+        avg += ((int256(previousOpen) * 8) - avg + int256(1 << (OPEN_TICK_AVG_SHIFT - 1))) >> OPEN_TICK_AVG_SHIFT;
+        return int24(avg);
     }
 
     function _stepHorizon(PoolId id, PoolState memory s, PoolStateAux memory a, int24 tickNow, uint160 sqrtPriceX96)
@@ -663,12 +714,16 @@ contract VaneHook is IHooks, IUnlockCallback {
         a.checkpointBlock = uint32(block.number);
 
         uint256 sigmaX64 = HorizonVariance.sigmaX64(a.varKX32, horizon);
-        uint256 noiseX64 = FlowVariance.noiseScaleX64(s.flowVarUnitsSq);
+        uint256 noiseA = FlowVariance.noiseScale(s.flowVarUnitsSq);
 
         uint256 depth = DepthLib.depthX64(_manipulationResistantLiquidity(id), sqrtPriceX96, flowUnitOf(id));
 
-        uint256 openLoop = KappaLib.kappaX64(depth, sigmaX64, noiseX64, KAPPA_MAX_X64);
-        openLoop = _applyDivergenceCheck(id, s.flowVarUnitsSq, openLoop);
+        // Scaled by a fixed fraction. This stood where Route B's divergence check did, and
+        // reproduces what that check did in practice: it never once identified a noise scale
+        // in the replay simulator, so it always applied its unidentified penalty, a quarter.
+        uint256 openLoop =
+            (KappaLib.kappaX64(depth, sigmaX64, noiseA * Q64x64.ONE_X64_U, KAPPA_MAX_X64) * uint256(GAIN_SCALE_X32))
+                >> 32;
 
         // A saturated flow estimate is not a small noise scale, it is an unknown one, and
         // the two enter the gain identically: the clamp caps U while sigma keeps rising,
@@ -732,6 +787,23 @@ contract VaneHook is IHooks, IUnlockCallback {
         );
     }
 
+    /// Whether this block's opening swap should run the horizon checkpoint.
+    ///
+    /// A checkpoint and a payout are each the most expensive thing a swap can do, and
+    /// together they cost 73,000 gas against a budget of 45,000. So a checkpoint that falls
+    /// due on a swap that may be paid — one that runs against the committed belief — waits
+    /// for a later block's opening swap. Nothing is lost by waiting: the variance estimators
+    /// normalise by the horizon actually elapsed, the walk prices soundly at any fixed gain,
+    /// and the gain it would have replaced keeps applying meanwhile. The wait is bounded, so
+    /// the gain cannot be frozen by keeping every block's first swap on the paying side;
+    /// past the bound the checkpoint runs anyway, and that swap pays for both.
+    function _horizonDue(uint32 checkpointBlock, int64 belief, bool zeroForOne) private view returns (bool) {
+        uint256 since = _blocksSinceCheckpoint(checkpointBlock);
+        if (since < HORIZON_K) return false;
+        bool mayBePaid = zeroForOne ? belief > 0 : belief < 0;
+        return !mayBePaid || since >= uint256(HORIZON_K) * (1 + MAX_CHECKPOINT_DEFERRAL_HORIZONS);
+    }
+
     /// Blocks elapsed since a checkpoint, tolerating the truncation to uint32.
     ///
     /// The checkpoint is stored as a uint32 to fit the packed word. Once block.number
@@ -748,36 +820,21 @@ contract VaneHook is IHooks, IUnlockCallback {
 
     function _manipulationResistantLiquidity(PoolId id) private returns (uint128) {
         uint128 liquidityNow = POOL_MANAGER.getLiquidity(id);
-        SlowState storage slow = _slow[id];
-        uint128 liquidityPrev = slow.checkpointLiquidity;
-        slow.checkpointLiquidity = liquidityNow;
+        PoolSettings storage settings = _settings[id];
+        uint128 liquidityPrev = settings.checkpointLiquidity;
+        settings.checkpointLiquidity = liquidityNow;
 
         if (liquidityPrev == 0) return 0;
         return liquidityPrev < liquidityNow ? liquidityPrev : liquidityNow;
-    }
-
-    function _applyDivergenceCheck(PoolId id, uint64 flowVar, uint256 openLoop) private returns (uint256) {
-        uint256 minRatio = MIN_COV_RATIO_X32;
-        uint256 noiseB = FlowAutocovariance.noiseScale(_flowCov[id], flowVar, minRatio);
-        if (noiseB == 0) {
-            return FlowAutocovariance.attenuate(openLoop, MAX_DIVERGENCE_X32, UNIDENTIFIED_PENALTY_X32);
-        }
-
-        uint256 noiseA = FlowVariance.noiseScale(flowVar);
-        uint256 divergence = FlowAutocovariance.divergenceX32(noiseA, noiseB);
-        if (divergence <= MAX_DIVERGENCE_X32) return openLoop;
-
-        emit EstimatorDivergence(id, noiseA, noiseB, divergence);
-
-        return FlowAutocovariance.attenuate(openLoop, MAX_DIVERGENCE_X32, divergence);
     }
 
     /// `reserve` is passed in rather than read here so the payout path reads the hook's
     /// claim balance once instead of once per consumer. Note the reserve is the hook's
     /// GLOBAL balance in this currency, not this pool's share of it: pools sharing a
     /// currency share one pot, which the event parameters name explicitly.
-    function _scaleForReserve(PoolId id, int256 d, Currency payCurrency, uint256 reserve) private returns (int256) {
-        uint256 target = targetFor(payCurrency);
+    function _scaleForReserve(PoolId id, int256 d, bool payInCurrency1, uint256 reserve) private returns (int256) {
+        PoolSettings storage settings = _settings[id];
+        uint256 target = _targetOf(payInCurrency1 ? settings.target1 : settings.target0);
         if (reserve >= target) return d;
 
         emit BeliefScaled(id, reserve, target);
@@ -818,7 +875,7 @@ contract VaneHook is IHooks, IUnlockCallback {
         if (w.walkedWei == 0) return 0;
 
         int256 d = BeliefState.walkAverage(w.x0, w.x1, int256(uint256(DELTA_MAX_X64)));
-        if (d == 0 || !allowlisted[id]) return 0;
+        if (d == 0 || !_settings[id].allowlisted) return 0;
 
         Currency unspecified = _unspecifiedCurrency(key, params);
         bool hookTakes = params.zeroForOne ? (d < 0) : (d > 0);
@@ -830,11 +887,14 @@ contract VaneHook is IHooks, IUnlockCallback {
 
         if (!hookTakes) {
             reserve = reserveOf(unspecified);
-            d = _clampPayout(_scaleForReserve(id, d, unspecified, reserve), key.fee);
+            d = _clampPayout(
+                _scaleForReserve(id, d, Currency.unwrap(unspecified) == Currency.unwrap(key.currency1), reserve),
+                key.fee
+            );
             if (d == 0) return 0;
         }
 
-        uint256 amount = _offsetAmount(id, params, delta, d, w, hookTakes);
+        uint256 amount = _offsetAmount(params, delta, d, w, hookTakes, key.fee);
         if (!hookTakes) amount = _feeHaircut(amount, key.fee);
 
         (int128 hookDelta, uint256 shortfall) = _capToReserve(_signedOffset(hookTakes, amount), reserve);
@@ -918,30 +978,38 @@ contract VaneHook is IHooks, IUnlockCallback {
     /// mispriced the currency0 quadrants at second order, and in the exact-output sell it
     /// did so in the trader's favour.
     function _offsetAmount(
-        PoolId id,
         SwapParams calldata params,
         BalanceDelta delta,
         int256 d,
         Walk memory w,
-        bool hookTakes
-    ) private view returns (uint256) {
+        bool hookTakes,
+        uint24 fee
+    ) private pure returns (uint256) {
         bool unspecifiedIsOne = params.zeroForOne == (params.amountSpecified < 0);
         if (unspecifiedIsOne) return OffsetDelta.offsetAmount(w.walkedWei, d);
         return OffsetDelta.offsetAmount(
-            _toCurrency0(delta, w.walkedWei, _referenceTick(id, w.refTick, hookTakes), hookTakes), -d
+            _toCurrency0(
+                delta,
+                w.walkedWei,
+                _referenceTick(w.refTick, w.refAvgEighths, hookTakes),
+                hookTakes,
+                params.zeroForOne,
+                fee
+            ),
+            -d
         );
     }
 
     /// The reference tick a currency0 conversion is made at: of the block's opening tick
     /// and the slow average, the lower when the hook collects (a lower price, so more
     /// currency0) and the higher when it pays, each rounded on the hook's side.
-    function _referenceTick(PoolId id, int24 openTick, bool hookTakes) private view returns (int24) {
-        int256 ewma = int256(_slow[id].openTickEwmaX8);
+    function _referenceTick(int24 openTick, int24 avgEighths, bool hookTakes) private pure returns (int24) {
+        int256 avg = int256(avgEighths);
         if (hookTakes) {
-            int256 floorEwma = ewma >> 8;
-            return floorEwma < int256(openTick) ? int24(floorEwma) : openTick;
+            int256 floorAvg = avg >> 3;
+            return floorAvg < int256(openTick) ? int24(floorAvg) : openTick;
         }
-        int256 ceilEwma = -((-ewma) >> 8);
+        int256 ceilEwma = -((-avg) >> 3);
         int256 tick = int256(openTick) + 1;
         if (ceilEwma > tick) tick = ceilEwma;
         return tick > int256(TickMath.MAX_TICK) ? TickMath.MAX_TICK : int24(tick);
@@ -953,19 +1021,34 @@ contract VaneHook is IHooks, IUnlockCallback {
     /// price above 2^32, so each mulDiv result is below 2^192 and then 2^256; the execution
     /// leg multiplies two int128 magnitudes; and amount1 is nonzero because at least one
     /// whole flow unit was walked.
-    function _toCurrency0(BalanceDelta delta, uint256 walkedWei, int24 refTick, bool hookTakes)
-        private
-        pure
-        returns (uint256)
-    {
-        uint256 atExecution;
-        unchecked {
-            atExecution = (Q64x64.abs(int256(delta.amount0())) * walkedWei) / Q64x64.abs(int256(delta.amount1()));
-        }
-
+    function _toCurrency0(
+        BalanceDelta delta,
+        uint256 walkedWei,
+        int24 refTick,
+        bool hookTakes,
+        bool zeroForOne,
+        uint24 fee
+    ) private pure returns (uint256) {
         uint160 sqrtRef = TickMath.getSqrtPriceAtTick(refTick);
         uint256 atReference =
             FullMath.mulDiv(FullMath.mulDiv(walkedWei, FixedPoint96.Q96, sqrtRef), FixedPoint96.Q96, sqrtRef);
+
+        // The swap's own rate, with the LP fee taken back out of whichever leg was the input.
+        // Left in, it shaded every currency0 conversion by the fee, in the trader's favour on
+        // a buy: when both references have been pushed above the market, this rate is what a
+        // collection falls back to, and the fee was a free part of the error.
+        uint256 a0 = Q64x64.abs(int256(delta.amount0()));
+        uint256 a1 = Q64x64.abs(int256(delta.amount1()));
+        uint256 keep = FEE_DENOMINATOR - uint256(fee);
+        unchecked {
+            if (zeroForOne) a0 = (a0 * keep) / FEE_DENOMINATOR;
+            else a1 = (a1 * keep) / FEE_DENOMINATOR;
+        }
+        if (a1 == 0) return atReference;
+        uint256 atExecution;
+        unchecked {
+            atExecution = (a0 * walkedWei) / a1;
+        }
 
         if (hookTakes) return atReference > atExecution ? atReference : atExecution;
         return atReference < atExecution ? atReference : atExecution;

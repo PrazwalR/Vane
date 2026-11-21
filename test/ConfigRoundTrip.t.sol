@@ -46,9 +46,7 @@ contract ConfigRoundTripTest is Test, Deployers {
         assertEq(got.maxTickDelta, want.maxTickDelta, "maxTickDelta");
         assertEq(got.flowUnit, want.flowUnit, "flowUnit");
         assertEq(got.reserveTargetDefault, want.reserveTargetDefault, "reserveTargetDefault");
-        assertEq(got.maxEstimatorDivergenceX32, want.maxEstimatorDivergenceX32, "maxEstimatorDivergenceX32");
-        assertEq(got.routeBZScore, want.routeBZScore, "routeBZScore");
-        assertEq(got.unidentifiedPenaltyX32, want.unidentifiedPenaltyX32, "unidentifiedPenaltyX32");
+        assertEq(got.gainScaleX32, want.gainScaleX32, "gainScaleX32");
     }
 
     /// Guards against a field being added to the struct without being wired through. The
@@ -56,7 +54,7 @@ contract ConfigRoundTripTest is Test, Deployers {
     /// direct count — if this fails, a field was added and the assertions above were not
     /// extended to cover it.
     function test_ConfigHasExactlyTheFieldsCoveredAbove() public view {
-        assertEq(abi.encode(hook.config()).length, 16 * 32, "config field count changed; extend the round-trip test");
+        assertEq(abi.encode(hook.config()).length, 14 * 32, "config field count changed; extend the round-trip test");
     }
 
     /// The packed state words are built from an offset table that has no compile-time link
@@ -81,18 +79,23 @@ contract ConfigRoundTripTest is Test, Deployers {
         assertEq(sBack.saturated, s.saturated, "saturated");
         assertEq(sBack.flowUnmeasurable, s.flowUnmeasurable, "flowUnmeasurable");
 
+        // The checkpoint is stored as an age below the last block, so the extreme case is the
+        // oldest age that still fits: 65,535 blocks, across the uint32 wrap.
+        uint32 lastBlock = 100;
         PoolStateAux memory a = PoolStateAux({
             checkpointTick: type(int24).min,
-            checkpointBlock: type(uint32).max,
+            checkpointBlock: uint32((uint256(lastBlock) + (1 << 32) - 65_535) % (1 << 32)),
             varKX32: type(uint64).max,
             kappaX64: type(uint64).max,
-            flowAccum: type(int64).min
+            flowAccum: type(int64).min,
+            openTickAvgEighths: type(int24).min
         });
-        PoolStateAux memory aBack = PoolStateLib.unpackAux(PoolStateLib.packAux(a));
+        PoolStateAux memory aBack = PoolStateLib.unpackAux(PoolStateLib.packAux(a, lastBlock), lastBlock);
         assertEq(aBack.checkpointTick, a.checkpointTick, "checkpointTick");
         assertEq(aBack.checkpointBlock, a.checkpointBlock, "checkpointBlock");
         assertEq(aBack.varKX32, a.varKX32, "varKX32");
         assertEq(aBack.kappaX64, a.kappaX64, "kappaX64");
         assertEq(aBack.flowAccum, a.flowAccum, "flowAccum");
+        assertEq(aBack.openTickAvgEighths, a.openTickAvgEighths, "openTickAvgEighths");
     }
 }

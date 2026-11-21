@@ -337,19 +337,44 @@ contract VarianceTest is Test {
 
     function testFuzz_PoolStateAux_RoundTrips(
         int24 checkpointTick,
-        uint32 checkpointBlock,
+        uint32 lastBlock,
+        uint16 age,
         uint64 varKX32,
         uint64 kappaX64,
-        int64 flowAccum
+        int64 flowAccum,
+        int24 openTickAvgEighths
     ) public pure {
-        PoolStateAux memory original = PoolStateAux(checkpointTick, checkpointBlock, varKX32, kappaX64, flowAccum);
-        PoolStateAux memory decoded = PoolStateLib.unpackAux(PoolStateLib.packAux(original));
+        uint32 checkpointBlock;
+        unchecked {
+            checkpointBlock = lastBlock - age;
+        }
+        PoolStateAux memory original =
+            PoolStateAux(checkpointTick, checkpointBlock, varKX32, kappaX64, flowAccum, openTickAvgEighths);
+        PoolStateAux memory decoded = PoolStateLib.unpackAux(PoolStateLib.packAux(original, lastBlock), lastBlock);
 
         assertEq(decoded.checkpointTick, checkpointTick, "checkpointTick must survive");
         assertEq(decoded.checkpointBlock, checkpointBlock, "checkpointBlock must survive");
         assertEq(decoded.varKX32, varKX32, "varK must survive");
         assertEq(decoded.kappaX64, kappaX64, "kappa must survive");
         assertEq(decoded.flowAccum, flowAccum, "flowAccum must survive, including the sign");
+        assertEq(decoded.openTickAvgEighths, openTickAvgEighths, "the average must survive, including the sign");
+    }
+
+    /// A checkpoint older than 65,535 blocks is stored as exactly that old. Every reader only
+    /// asks whether a horizon has passed and how long it was, clamped to uint16, so an older
+    /// one reads identically.
+    function testFuzz_PoolStateAux_StaleCheckpointSaturates(uint32 lastBlock, uint32 rawAge) public pure {
+        uint256 age = bound(uint256(rawAge), 65_536, type(uint32).max);
+        PoolStateAux memory a;
+        unchecked {
+            a.checkpointBlock = lastBlock - uint32(age);
+        }
+        PoolStateAux memory decoded = PoolStateLib.unpackAux(PoolStateLib.packAux(a, lastBlock), lastBlock);
+        uint32 decodedAge;
+        unchecked {
+            decodedAge = lastBlock - decoded.checkpointBlock;
+        }
+        assertEq(decodedAge, 65_535, "a stale checkpoint saturates rather than wrapping");
     }
 
     function testFuzz_ReservedBitsStayZero(

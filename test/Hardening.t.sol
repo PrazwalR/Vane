@@ -124,7 +124,7 @@ contract HardeningTest is Test, Deployers {
         hook.acceptOwnership();
 
         vm.expectRevert(VaneHook.Vane__NotOwner.selector);
-        hook.setReserveTarget(currency0, 1);
+        hook.setReserveTarget(vaneKey, currency0, 1);
     }
 
     // ---------------------------------------------------------------- allowlist

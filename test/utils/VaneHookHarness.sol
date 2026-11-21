@@ -8,7 +8,6 @@ import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {VaneHook} from "../../src/VaneHook.sol";
 import {VaneConfig} from "../../src/config/VaneConfig.sol";
 import {PoolStateLib, PoolState, PoolStateAux} from "../../src/libraries/PoolStateLib.sol";
-import {FlowCovState} from "../../src/libraries/FlowAutocovariance.sol";
 
 contract VaneHookHarness is VaneHook {
     using PoolIdLibrary for PoolKey;
@@ -24,19 +23,10 @@ contract VaneHookHarness is VaneHook {
 
     function setKappa(PoolKey calldata key, uint64 kappaX64) external {
         PoolId id = key.toId();
-        PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id]);
+        uint32 lastBlock = PoolStateLib.lastBlockOf(_state[id]);
+        PoolStateAux memory a = PoolStateLib.unpackAux(_aux[id], lastBlock);
         a.kappaX64 = kappaX64;
-        _aux[id] = PoolStateLib.packAux(a);
-    }
-
-    function setFlowCov(PoolKey calldata key, int64 cov1, int64 cov2) external {
-        FlowCovState storage st = _flowCov[key.toId()];
-        st.cov1 = cov1;
-        st.cov2 = cov2;
-    }
-
-    function flowCovOf(PoolKey calldata key) external view returns (FlowCovState memory) {
-        return _flowCov[key.toId()];
+        _aux[id] = PoolStateLib.packAux(a, lastBlock);
     }
 
     function setFlowVar(PoolKey calldata key, uint64 flowVar) external {

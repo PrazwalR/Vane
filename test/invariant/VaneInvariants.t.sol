@@ -230,8 +230,8 @@ contract VaneInvariantsTest is StdInvariant, Test, Deployers {
         Currency c1 = handler.currency1();
 
         // A target of zero would make `scaleForReserve` divide by zero on the payout path.
-        assertGt(hook.targetFor(c0), 0, "currency0 must always have a usable target");
-        assertGt(hook.targetFor(c1), 0, "currency1 must always have a usable target");
+        assertGt(hook.targetFor(vaneKey, c0), 0, "currency0 must always have a usable target");
+        assertGt(hook.targetFor(vaneKey, c1), 0, "currency1 must always have a usable target");
 
         // Neither pool may hold a belief larger than the clamp while the shared pot is
         // empty — that is the state in which a payout would exceed the holding.

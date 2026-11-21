@@ -49,12 +49,5 @@ sol! {
     }
     function poolState(bytes32 id) external view returns (PoolState);
 
-    struct FlowCovState {
-        int64 prevFlow1;
-        int64 prevFlow2;
-        int64 cov1;
-        int64 cov2;
-    }
-    function flowCovOf(bytes32 id) external view returns (FlowCovState);
     function extsload(bytes32 slot) external view returns (bytes32);
 }

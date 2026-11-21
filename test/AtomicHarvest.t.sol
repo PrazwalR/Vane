@@ -322,9 +322,87 @@ contract AtomicHarvestTest is Test, Deployers {
         assertGe(reserve, 0, "and must not shrink the reserve");
     }
 
+    /// The manipulation limit, modelled with the cost that makes it a limit. The attacker
+    /// holds the price up for `blocks` consecutive blocks so the slow average drifts toward
+    /// it, then harvests in one transaction: JIT liquidity, exact-input buys that pay the
+    /// hook currency0 at the drifted reference, sells for currency1, and the price put back.
+    ///
+    /// What the attacks above leave out is that a price held off the market does not stay
+    /// there. An arbitrageur trades it back as the first transaction of every block, so the
+    /// attacker has to push it up again as the last transaction of every block, paying the
+    /// pool's fee and slippage each time. That is the cost the average is meant to impose.
+    function testFuzz_AHeldPriceCannotBeHarvested(
+        uint8 rawTier,
+        uint64 rawKappa,
+        uint16 rawBlocks,
+        uint16 rawPushTicks,
+        uint96 rawBuild,
+        uint8 rawLegs,
+        uint16 rawShallow
+    ) public {
+        Excursion memory e;
+        e.k = keys[bound(rawTier, 0, 2)];
+        e.build = bound(rawBuild, 1_000 ether, 200_000 ether);
+        e.legs = bound(rawLegs, 1, 20);
+        uint256 blocks = bound(rawBlocks, 1, 200);
+        // A shallow pool makes holding the price cheap, which is the attacker's best case:
+        // leave between 0.1% and all of the resident liquidity in place.
+        uint256 removed = (10_000 ether * bound(rawShallow, 0, 999)) / 1000;
+        if (removed > 0) {
+            modifyLiquidityRouter.modifyLiquidity(e.k, ModifyLiquidityParams(-60000, 60000, -int256(removed), 0), "");
+        }
+        int24 pushTicks = int24(int256(bound(rawPushTicks, 10, 2_000)));
+        hook.setKappa(e.k, uint64(bound(rawKappa, 1e4, 1e9)));
+
+        address arb = makeAddr("arb");
+        MockERC20(Currency.unwrap(currency0)).mint(arb, 1e30);
+        MockERC20(Currency.unwrap(currency1)).mint(arb, 1e30);
+        vm.startPrank(arb);
+        MockERC20(Currency.unwrap(currency0)).approve(address(swapRouter), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
+        vm.stopPrank();
+
+        vm.roll(block.number + 1);
+        (e.start,,,) = manager.getSlot0(e.k.toId());
+        uint160 high = TickMath.getSqrtPriceAtTick(pushTicks);
+        Snap memory s0 = _snap();
+
+        for (uint256 b = 0; b < blocks; b++) {
+            vm.roll(block.number + 1);
+            // First transaction of the block: the arbitrageur takes the price back. A
+            // start/stop prank, because the helper's first call is a price read and a
+            // one-shot prank would be spent on it.
+            vm.startPrank(arb);
+            _swapLimited(e.k, true, -int256(10_000_000 ether), e.start);
+            vm.stopPrank();
+            // Last transaction of the block: the attacker pushes it up again, with an
+            // exact-output buy so the belief it walks settles exactly in currency1.
+            _swapLimited(e.k, false, int256(10_000_000 ether), high);
+        }
+
+        // The harvest block. The arbitrageur still goes first.
+        vm.roll(block.number + 1);
+        vm.startPrank(arb);
+        _swapLimited(e.k, true, -int256(10_000_000 ether), e.start);
+        vm.stopPrank();
+
+        ModifyLiquidityParams memory jit = ModifyLiquidityParams(-6000, 6000, int256(10_000_000 ether), 0);
+        modifyLiquidityRouter.modifyLiquidity(e.k, jit, "");
+        _swapLimited(e.k, false, -int256(e.build), TickMath.getSqrtPriceAtTick(5_000));
+        for (uint256 i = 0; i < e.legs; i++) {
+            _swapLimited(e.k, true, -int256(e.build / e.legs), e.start);
+        }
+        _closeAt(e.k, e.start);
+        jit.liquidityDelta = -jit.liquidityDelta;
+        modifyLiquidityRouter.modifyLiquidity(e.k, jit, "");
+
+        (int256 attacker,) = _pnl(s0);
+        assertLe(attacker, 0, "holding a price against arbitrage and harvesting it must not pay");
+    }
+
     /// The property the attack above depends on, pinned directly: a price pushed in one
     /// block and held into the next does not move the reference the next block converts at,
-    /// and once it does enter, it moves the average by a sixteenth.
+    /// and once it does enter, it moves the average by a sixty-fourth.
     function test_TheReferenceLagsTheOpeningByABlock() public {
         PoolKey memory k = keys[1];
         PoolId pid = k.toId();
@@ -333,7 +411,7 @@ contract AtomicHarvestTest is Test, Deployers {
         vm.roll(block.number + 1);
         (, int24 openN,,) = manager.getSlot0(pid);
         _swap(k, false, -5_000 ether);
-        int256 avgN = hook.openTickAverageX8Of(pid);
+        int256 avgN = hook.openTickAverageOf(pid);
         (, int24 pushed,,) = manager.getSlot0(pid);
         assertGt(pushed, openN + 100, "precondition: the push moved the price");
 
@@ -341,23 +419,25 @@ contract AtomicHarvestTest is Test, Deployers {
         // the honest one — so the reference this block converts at has not seen the push.
         vm.roll(block.number + 1);
         _swap(k, false, -1 ether);
-        int256 avgN1 = hook.openTickAverageX8Of(pid);
-        assertEq(
-            avgN1, avgN + (((int256(openN) << 8) - avgN) >> 4), "the current opening must not move its own reference"
-        );
+        int256 avgN1 = hook.openTickAverageOf(pid);
+        assertEq(avgN1, _fold(avgN, openN), "the current opening must not move its own reference");
 
         // Block N+2's rollover folds in N+1's opening, which was the pushed price, at a
-        // weight of one sixteenth.
+        // weight of one sixty-fourth.
         vm.roll(block.number + 1);
         _swap(k, false, -1 ether);
         assertEq(
-            hook.openTickAverageX8Of(pid),
-            avgN1 + (((int256(pushed) << 8) - avgN1) >> 4),
-            "it enters once a boundary has passed, at a sixteenth"
+            hook.openTickAverageOf(pid), _fold(avgN1, pushed), "it enters once a boundary has passed, at a sixty-fourth"
         );
     }
 
     // ------------------------------------------------------------------- helpers
+
+    /// The hook's update of the opening-tick average, in eighths of a tick: a 1/64 step
+    /// toward the folded tick, rounded to nearest.
+    function _fold(int256 avgEighths, int24 tick) internal pure returns (int256) {
+        return avgEighths + (((int256(tick) * 8) - avgEighths + 32) >> 6);
+    }
 
     struct Snap {
         uint256 t0;
@@ -375,10 +455,15 @@ contract AtomicHarvestTest is Test, Deployers {
 
     /// Both legs valued at the pools' common starting price of 1:1.
     function _pnl(Snap memory s) internal view returns (int256 attacker, int256 reserve) {
-        attacker =
-            (int256(currency0.balanceOfSelf()) - int256(s.t0)) + (int256(currency1.balanceOfSelf()) - int256(s.t1));
-        reserve =
-            (int256(hook.reserveOf(currency0)) - int256(s.h0)) + (int256(hook.reserveOf(currency1)) - int256(s.h1));
+        attacker = _diff(currency0.balanceOfSelf(), s.t0) + _diff(currency1.balanceOfSelf(), s.t1);
+        reserve = _diff(hook.reserveOf(currency0), s.h0) + _diff(hook.reserveOf(currency1), s.h1);
+    }
+
+    /// `now - before` as a signed number, taken in unsigned arithmetic first. The test
+    /// contract is minted 2^255 of each token, so casting a balance to int256 overflows as
+    /// soon as it rises at all.
+    function _diff(uint256 now_, uint256 before) internal pure returns (int256) {
+        return now_ >= before ? int256(now_ - before) : -int256(before - now_);
     }
 
     function _swap(PoolKey memory k, bool zeroForOne, int256 amountSpecified) internal {
