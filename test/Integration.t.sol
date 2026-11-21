@@ -34,7 +34,9 @@ contract IntegrationTest is Test, Deployers {
     PoolKey internal plainKey;
     PoolId internal id;
 
-    uint16 internal constant HORIZON_K = 20;
+    /// Read from the shipped configuration rather than restated, so a recalibrated horizon
+    /// cannot leave these tests timing checkpoints against the wrong one.
+    uint16 internal HORIZON_K = Fixtures.config().horizonK;
 
     /// Set from a measurement with about 1% headroom, so a regression fails. See
     /// test_Gas_WorstCaseCheckpointWithActiveBelief for what it measures.

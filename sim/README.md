@@ -30,6 +30,13 @@ command-line arguments (`--sigma`, `--noise-rate`, `--noise-size`, `--momentum`)
 it does not. `--json` emits one line per run for sweeps; `./sweep.sh` and `./scan_depth.sh`
 are the two sweeps whose results are written up in `SIMULATOR-FINDINGS.md`.
 
+`./calibrate.sh` sweeps the belief's decay rate and the horizon length. The hook's
+parameters are immutable, so each set is a separate dump: `SIM_THETA_X64`, `SIM_HORIZON_K`
+and `SIM_GAIN_SCALE_X32` override the shipped values in `test/sim/SimStateDump.t.sol`,
+`SIM_STATE_DIR` puts the dump under `sim/state/<name>`, and `--state` tells the replay
+which one to load, so the replays run in parallel. Results land in
+`sim/results/calibration.jsonl`, one line per run, tagged with the parameters.
+
 ## What it measures
 
 Arbitrageur profit marked at the fundamental, which is exactly LVR; the variance ratio of

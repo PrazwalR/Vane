@@ -133,6 +133,12 @@ const FINDINGS: Finding[] = [
   },
   {
     what:
+      "A pool whose price ran past its liquidity opened the next block near the minimum tick. A currency0 collection converted there overflowed a guard that returned zero, so a buy through the empty ticks built belief for free and the sell back was paid 235 ether, three times. Collections are now computed at full width and capped at the swap's own leg, crediting only the belief that was paid for.",
+    severity: "High",
+    state: "Fixed",
+  },
+  {
+    what:
       "Gas was measured in one long test transaction, where every slot the setup touched counts as warm. The first swap of a block really cost 45,194 against a 45,000 budget, not the 24,246 reported, and the worst case 79,738.",
     severity: "Medium",
     state: "Fixed",

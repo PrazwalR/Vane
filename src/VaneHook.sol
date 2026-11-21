@@ -528,6 +528,8 @@ contract VaneHook is IHooks, IUnlockCallback {
         uint256 walkedWei;
         int24 refTick;
         int24 refAvgEighths;
+        /// Share of the walk the swap paid for, in X64: all of it unless the take was capped.
+        uint256 creditX64;
     }
 
     function _recordSwap(PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
@@ -597,7 +599,14 @@ contract VaneHook is IHooks, IUnlockCallback {
             // block ended at, fixed for every swap in this one.
             w.refTick = s.lastTick;
             w.refAvgEighths = a.openTickAvgEighths;
+            w.creditX64 = ONE_X64_U;
             hookDeltaUnspecified = _applyOffset(id, key, params, delta, w);
+            if (w.creditX64 < ONE_X64_U) {
+                // The take was capped (see `_capTake`), so only the share of the walk that
+                // was paid for moves the belief. Rounded toward zero, so never more.
+                int256 walked = int256(a.flowAccum) - int256(accumBefore);
+                a.flowAccum = int64(int256(accumBefore) + (walked * int256(w.creditX64)) / int256(ONE_X64_U));
+            }
         }
 
         // The state word changes here only when one of its two flags is first raised, so it is
@@ -895,7 +904,11 @@ contract VaneHook is IHooks, IUnlockCallback {
         }
 
         uint256 amount = _offsetAmount(params, delta, d, w, hookTakes, key.fee);
-        if (!hookTakes) amount = _feeHaircut(amount, key.fee);
+        if (!hookTakes) {
+            amount = _feeHaircut(amount, key.fee);
+        } else if (Currency.unwrap(unspecified) == Currency.unwrap(key.currency0)) {
+            (amount, w.creditX64) = _capTake(amount, Q64x64.abs(int256(delta.amount0())));
+        }
 
         (int128 hookDelta, uint256 shortfall) = _capToReserve(_signedOffset(hookTakes, amount), reserve);
 
@@ -909,6 +922,28 @@ contract VaneHook is IHooks, IUnlockCallback {
 
         _settleOrTake(unspecified, hookDelta);
         return hookDelta;
+    }
+
+    /// Caps a currency0 collection at twice the largest belief's share of the swap's own
+    /// currency0 leg, and reports what fraction of the walk that still pays for.
+    ///
+    /// A collection converted at the reference price can exceed everything the swap
+    /// delivers in currency0 when the reference sits far below the execution price. That
+    /// happened in the replay simulator when a trend ran the pool past its liquidity to the
+    /// minimum tick: the block then opened at a price of about 1e-38, so every buy that
+    /// walked the belief upward owed more currency0 than it received and reverted, and the
+    /// pool could not climb back. Honest swaps never reach the cap, because their execution
+    /// and reference prices are within a factor of two.
+    ///
+    /// Capping alone would reopen the attack the reference exists to stop: jump the
+    /// execution price through empty ticks with JIT liquidity, pay the capped amount, and
+    /// harvest the belief. So a capped swap is credited with only the share of its walk it
+    /// paid for, and the belief moves by that share and no more.
+    function _capTake(uint256 amount, uint256 leg0) private view returns (uint256, uint256 creditX64) {
+        uint256 cap = (leg0 * 2 * uint256(DELTA_MAX_X64)) >> 64;
+        if (amount <= cap) return (amount, ONE_X64_U);
+        // amount > cap >= 0, so this is below 2^64.
+        return (cap, (cap << 64) / amount);
     }
 
     /// Clamps a payout by the pool's own fee, and drops it below the dust threshold.
@@ -987,17 +1022,18 @@ contract VaneHook is IHooks, IUnlockCallback {
     ) private pure returns (uint256) {
         bool unspecifiedIsOne = params.zeroForOne == (params.amountSpecified < 0);
         if (unspecifiedIsOne) return OffsetDelta.offsetAmount(w.walkedWei, d);
-        return OffsetDelta.offsetAmount(
-            _toCurrency0(
-                delta,
-                w.walkedWei,
-                _referenceTick(w.refTick, w.refAvgEighths, hookTakes),
-                hookTakes,
-                params.zeroForOne,
-                fee
-            ),
-            -d
+        uint256 base = _toCurrency0(
+            delta, w.walkedWei, _referenceTick(w.refTick, w.refAvgEighths, hookTakes), hookTakes, params.zeroForOne, fee
         );
+        // Full width, deliberately not `OffsetDelta.offsetAmount`. That returns zero for any
+        // amount past int128 as an overflow guard, which is the safe answer for a payout and
+        // a free belief for a collection: converted at a reference near the minimum tick, a
+        // currency0 amount reaches 10^62, and a buy that jumped the price through empty
+        // ticks walked the belief for nothing — then the sell back was paid 235 ether for
+        // it, three times over, in the replay simulator. The true amount goes to
+        // `_capTake`, which credits the walk by what was actually collected. It cannot
+        // overflow: the base is below 2^220 and the factor below 2^58.
+        return FullMath.mulDiv(base, Q64x64.abs(OffsetDelta.taylorFactorX64(-d)), Q64x64.ONE_X64_U);
     }
 
     /// The reference tick a currency0 conversion is made at: of the block's opening tick

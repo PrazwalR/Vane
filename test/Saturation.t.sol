@@ -35,7 +35,9 @@ contract SaturationTest is Test, Deployers {
     PoolKey internal vaneKey;
     PoolId internal id;
 
-    uint16 internal constant HORIZON_K = 20;
+    /// Read from the shipped configuration rather than restated, so a recalibrated horizon
+    /// cannot leave these tests timing checkpoints against the wrong one.
+    uint16 internal HORIZON_K = Fixtures.config().horizonK;
     uint64 internal constant ONE_X32_99 = uint64((uint256(99) << 32) / 100);
 
     function setUp() public {

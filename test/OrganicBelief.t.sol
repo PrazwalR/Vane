@@ -23,7 +23,9 @@ contract OrganicBeliefTest is Test, Deployers {
     PoolKey internal vaneKey;
     PoolId internal id;
 
-    uint16 internal constant HORIZON_K = 20;
+    /// Read from the shipped configuration rather than restated, so a recalibrated horizon
+    /// cannot leave these tests timing checkpoints against the wrong one.
+    uint16 internal HORIZON_K = Fixtures.config().horizonK;
 
     function setUp() public {
         deployFreshManagerAndRouters();

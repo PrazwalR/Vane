@@ -119,7 +119,20 @@ Three changes close it:
   consecutive boundaries, each one open to arbitrage, to move it halfway.
 
 With those, 2,000 fuzz runs across depths, tiers, gains and holding periods find nothing,
-and removing the flow bound alone brings the 18.3-ether drain back. Honest traders pay for
+and removing the flow bound alone brings the 18.3-ether drain back.
+
+**A pool whose price leaves its liquidity.** The calibration sweep found the last one. A
+strong trend ran a pool past its liquidity band, so the price sat at the minimum tick and
+the next block opened at a price near 1e-38. Converted there, a buy's currency0 collection
+came to about 10^62, and the arithmetic behind it returned zero for anything past int128 —
+the safe answer for a payout, and a free belief for a collection. The arbitrageur's buy
+jumped the price through the empty ticks for nothing, the sell back was paid 235 ether, and
+it happened three times. Collections are now computed at full width, so the true amount is
+seen, and capped at 2% of the swap's own currency0 leg, twice the largest belief, which an
+honest swap never reaches. A capped swap moves the belief only by the share of its walk it
+actually paid for, so the cap cannot be used to build belief cheaply either. The same shape
+had also made such buys revert, because the collection exceeded the currency0 they received,
+which left the pool unable to climb back into its band. Honest traders pay for
 the average only while the price genuinely trends: a currency0 offset is then sized at a
 stale price, overcharged by the offset times the price's drift from its recent average. The
 bias always favours the reserve.

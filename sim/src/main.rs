@@ -282,10 +282,12 @@ fn main() {
                 Some(r) => (r._0.varOneX32, r._0.flowVarUnitsSq, r._0.saturated),
                 None => (0, 0, false),
             };
+            let r0 = reserve(&mut h, hook, c0) / 1e18;
+            let r1 = reserve(&mut h, hook, c1) / 1e18;
             println!(
-                "blk {:>5} kappa={:<12} belief={:<12} varOne={:<12} flowVar={:<18} sat={:<5} tick={}",
+                "blk {:>5} kappa={:<12} belief={:<12} varOne={:<12} flowVar={:<18} sat={:<5} tick={} reserve0={:.3} reserve1={:.3}",
                 block_i, kappa, belief, var1, fvar, sat,
-                pools[0].ticks.last().unwrap()
+                pools[0].ticks.last().unwrap(), r0, r1
             );
         }
         h.roll(1);

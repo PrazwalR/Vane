@@ -400,6 +400,47 @@ contract AtomicHarvestTest is Test, Deployers {
         assertLe(attacker, 0, "holding a price against arbitrage and harvesting it must not pay");
     }
 
+    /// The shape the replay simulator found once a trend ran a pool past its liquidity. The
+    /// pool's price sits at the minimum tick, so the next block opens at a price of about
+    /// 1e-38. A buy then jumps the price through the empty ticks to the maximum, walking
+    /// the belief upward, and in the block after a sell walks it back down and is paid.
+    ///
+    /// Converted at that opening price, the buy's currency0 collection was around 10^62 and
+    /// hit an overflow guard that returned zero, so the walk was free and the sell back was
+    /// paid 235 ether for it. Starting from no belief, so every unit of belief in the loop is
+    /// one the loop itself built: a belief planted beforehand would be a liability nobody
+    /// paid for, and being paid to unwind it is the mechanism working, not a leak.
+    function testFuzz_AJumpThroughEmptyTicksIsNotFree(uint8 rawTier, uint64 rawKappa) public {
+        uint24 fee = FEES[bound(rawTier, 0, 2)];
+        int24 spacing = SPACINGS[bound(rawTier, 0, 2)];
+        // A pool whose only liquidity is a narrow band, so the price can leave it.
+        PoolKey memory k = PoolKey(currency0, currency1, fee, spacing * 2, keys[0].hooks);
+        hook.allowPool(k, 1e15);
+        manager.initialize(k, SQRT_PRICE_1_1);
+        int24 edge = (3000 / (spacing * 2)) * (spacing * 2);
+        modifyLiquidityRouter.modifyLiquidity(k, ModifyLiquidityParams(-edge, edge, 1_000_000 ether, 0), "");
+        hook.setKappa(k, uint64(bound(rawKappa, 1e6, 1e9)));
+
+        // Run the price out of the band to the minimum tick.
+        vm.roll(block.number + 1);
+        _swapLimited(k, true, -int256(10_000_000 ether), TickMath.MIN_SQRT_PRICE + 1);
+        hook.setBelief(k, 0);
+
+        Snap memory s0 = _snap();
+
+        // Next block: jump to the maximum through the empty ticks.
+        vm.roll(block.number + 1);
+        _swapLimited(k, false, -int256(10_000_000 ether), TickMath.MAX_SQRT_PRICE - 1);
+        // The block after: sell it all back.
+        vm.roll(block.number + 1);
+        _swapLimited(k, true, -int256(10_000_000 ether), TickMath.MIN_SQRT_PRICE + 1);
+
+        (, int256 reserve) = _pnl(s0);
+        // Valued at 1:1, the band's own price; the loop moves the same tokens out and back,
+        // so what remains is the hook's offsets.
+        assertGe(reserve, 0, "a loop through empty ticks must not be paid out of the reserve");
+    }
+
     /// The property the attack above depends on, pinned directly: a price pushed in one
     /// block and held into the next does not move the reference the next block converts at,
     /// and once it does enter, it moves the average by a sixty-fourth.
