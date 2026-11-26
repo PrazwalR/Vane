@@ -1,0 +1,188 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  FOUNDRY_PROFILE: default
+  # Dependencies are vendored with --no-git rather than as submodules, so a fresh checkout
+  # has to fetch them — which means the version is whatever these pins say and nothing
+  # else. Leaving them unpinned let a v4-core change to StateLibrary, the Hooks flag bits
+  # or CurrencySettler land in CI with no commit here, and made local builds and CI able
+  # to disagree silently.
+  #
+  # v4-core is pinned to a commit rather than the v4.0.0 tag deliberately: that tag
+  # predates the split of SwapParams into types/PoolOperation.sol, which this code imports,
+  # so the released tag does not compile against it.
+  FORGE_STD_PIN: v1.17.0
+  V4_CORE_PIN: 46c6834698c48bc4a463a86d8420f4eb1d7f3b75
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+
+      - name: Install dependencies
+        run: |
+          forge install foundry-rs/forge-std@${FORGE_STD_PIN} --no-git
+          forge install Uniswap/v4-core@${V4_CORE_PIN} --no-git
+
+      - name: Check formatting
+        run: forge fmt --check
+
+      - name: Build
+        run: forge build --sizes
+
+      - name: Test
+        run: forge test -vv
+
+      # The property tests ranked most severe in the threat model get a deeper run than
+      # the default 256 cases: a revert in afterSwap bricks a pool permanently, so the
+      # no-revert property is worth the extra minute.
+      - name: Deep fuzz the critical properties
+        run: forge test --match-test "NeverReverts|NeverOverflows|RoundTrips|Saturat|Monotone"
+        env:
+          FOUNDRY_FUZZ_RUNS: 10000
+
+      # The stateful suite needs its own step. FOUNDRY_FUZZ_RUNS does not affect invariant
+      # campaigns — FOUNDRY_INVARIANT_RUNS and _DEPTH do — and the previous deep-fuzz
+      # filter matched no invariant_ test at all, so the only tests covering interleavings
+      # never got a deep run.
+      - name: Deep run the stateful invariants
+        run: forge test --match-path "test/invariant/*"
+        env:
+          FOUNDRY_INVARIANT_RUNS: 512
+          FOUNDRY_INVARIANT_DEPTH: 128
+
+      # Scoped to src/ to match the documented figure, and gated. Without a threshold
+      # coverage could fall to zero and the job would still pass, which makes the step a
+      # report rather than a check.
+      - name: Coverage
+        # Gas assertions compare against measured budgets, and coverage instrumentation
+        # inflates gas, so they are skipped here rather than left to fail.
+        run: |
+          forge coverage --report summary --no-match-coverage "(test|script)" | tee /tmp/cov.txt
+          python3 - <<'PY'
+          import re, sys
+          row = [l for l in open("/tmp/cov.txt") if l.startswith("| Total")]
+          if not row:
+              sys.exit("could not find the coverage total row")
+          pct = [float(x) for x in re.findall(r"([0-9]+\.[0-9]+)%", row[0])]
+          if len(pct) < 4:
+              sys.exit(f"unexpected coverage row shape: {row[0].strip()}")
+          lines, _stmts, branches, funcs = pct[0], pct[1], pct[2], pct[3]
+          print(f"lines {lines}%  branches {branches}%  functions {funcs}%")
+          floors = {"lines": (lines, 90.0), "branches": (branches, 80.0), "functions": (funcs, 85.0)}
+          bad = [f"{k} {v:.2f}% < {f:.0f}%" for k, (v, f) in floors.items() if v < f]
+          if bad:
+              sys.exit("coverage regressed: " + ", ".join(bad))
+          PY
+        env:
+          VANE_SKIP_GAS_ASSERTIONS: "true"
+
+      # No `|| forge snapshot` fallback. That turned the one guard protecting the project's
+      # largest open finding — worst-case swap-path gas — into an unconditional
+      # regenerate-and-pass, so it could never fail and never did.
+      - name: Gas snapshot
+        run: forge snapshot --check
+
+      # The site publishes figures about its own rigour. Every one of them was hand-typed
+      # and every one had drifted, so they are generated and committed — and this step
+      # fails if the committed copy no longer matches what the toolchain reports.
+      # Coverage is excluded from the comparison because it is refreshed separately.
+      - name: Check published status figures are current
+        run: |
+          cp frontend/generated/status.json /tmp/status.committed.json
+          ./scripts/collect-status.sh >/dev/null
+          python3 - <<'PY'
+          import json, sys
+          drop = {"generatedAt", "lineCoveragePct", "branchCoveragePct"}
+          a = {k: v for k, v in json.load(open("/tmp/status.committed.json")).items() if k not in drop}
+          b = {k: v for k, v in json.load(open("frontend/generated/status.json")).items() if k not in drop}
+          if a != b:
+              diff = {k: (a.get(k), b.get(k)) for k in set(a) | set(b) if a.get(k) != b.get(k)}
+              sys.exit(f"frontend/generated/status.json is stale (committed, actual): {diff}\n"
+                       f"run ./scripts/collect-status.sh --coverage and commit the result")
+          print("published figures match the toolchain")
+          PY
+
+  simulator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          # Pinning an exact version drops the components that ship with `stable`, so
+          # `cargo fmt` and `cargo clippy` are not present unless asked for by name.
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sim
+
+      - name: Install dependencies
+        run: |
+          forge install foundry-rs/forge-std@${FORGE_STD_PIN} --no-git
+          forge install Uniswap/v4-core@${V4_CORE_PIN} --no-git
+
+      # The replay engine produced the project's headline finding, so a regression in it is
+      # a regression in the evidence. It was previously not built in CI at all.
+      - name: Build the replay engine
+        run: cargo build --release --manifest-path sim/Cargo.toml
+
+      - name: Lint the replay engine
+        run: |
+          cargo fmt --manifest-path sim/Cargo.toml -- --check
+          cargo clippy --release --manifest-path sim/Cargo.toml -- -D warnings
+
+      - name: Test the replay engine
+        run: cargo test --release --manifest-path sim/Cargo.toml
+
+      - name: Dump pool state and replay against the compiled hook
+        run: |
+          forge test --match-path test/sim/SimStateDump.t.sol
+          cd sim && ./target/release/vane-sim --blocks 60 --json
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - name: Install dependencies
+        run: |
+          forge install foundry-rs/forge-std@${FORGE_STD_PIN} --no-git
+          forge install Uniswap/v4-core@${V4_CORE_PIN} --no-git
+      - uses: crytic/slither-action@v0.4.0
+        with:
+          fail-on: medium
+          slither-config: slither.config.json
+          target: .
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

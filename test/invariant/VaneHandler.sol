@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.26;
+
+import {CommonBase} from "forge-std/Base.sol";
+import {StdCheats} from "forge-std/StdCheats.sol";
+import {StdUtils} from "forge-std/StdUtils.sol";
+
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
+import {Currency} from "v4-core/types/Currency.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {FullMath} from "v4-core/libraries/FullMath.sol";
+import {FixedPoint96} from "v4-core/libraries/FixedPoint96.sol";
+import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
+import {PoolModifyLiquidityTest} from "v4-core/test/PoolModifyLiquidityTest.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+
+import {VaneHookHarness} from "../utils/VaneHookHarness.sol";
+
+/// Drives the hook through interleavings a single-shot test cannot reach: swaps of wildly
+/// varying size and direction, block rolls, liquidity added and pulled, and a reserve that
+/// is drained and refilled underneath all of it.
+///
+/// Bounds are deliberately WIDE. The suite's previous fuzz bounds sat two to four orders of
+/// magnitude below the regime where both critical bugs lived, so the properties that
+/// mattered were unreachable by construction. Swap sizes here span nine orders of magnitude
+/// and price limits are sometimes pinned one wei away, which is the shape of the phantom
+/// notional drain.
+contract VaneHandler is CommonBase, StdCheats, StdUtils {
+    using PoolIdLibrary for PoolKey;
+
+    IPoolManager public immutable manager;
+    VaneHookHarness public immutable hook;
+    PoolSwapTest public immutable swapRouter;
+    PoolModifyLiquidityTest public immutable liquidityRouter;
+    PoolKey public poolKey;
+    PoolKey public otherKey;
+
+    Currency public immutable currency0;
+    Currency public immutable currency1;
+
+    uint256 public ghostFunded0;
+    uint256 public ghostFunded1;
+    uint256 public ghostWithdrawn0;
+    uint256 public ghostWithdrawn1;
+
+    /// Cumulative REALIZED swap notional across both pools, taken from the returned
+    /// BalanceDelta rather than from what was requested.
+    ///
+    /// Requested size would not do. A price limit decouples the two, and the historical
+    /// phantom-notional drain paid out a percentage of the REQUEST while the realized
+    /// trade was dust — so a bound derived from requested size is one the bug satisfies.
+    /// Bounding by what actually executed is what gives the solvency invariant teeth.
+    uint256 public ghostNotional;
+
+    /// The same, per currency, in the units the hook sizes each currency's offsets in.
+    ///
+    /// Currency1 offsets are sized from currency1 flow, so its notional is the currency1
+    /// leg. Currency0 offsets are converted from that flow at the price the BLOCK opened at,
+    /// not the swap's own rate, so a block that moves the price a long way can size a
+    /// currency0 offset well beyond the swap's currency0 leg. Its notional is therefore the
+    /// larger of that leg and the currency1 leg converted at the lowest reference price.
+    uint256 public ghostNotional0;
+    uint256 public ghostNotional1;
+
+    /// High-water marks for the mechanism itself. Without these the suite cannot tell a
+    /// campaign that exercised VANE from one that exercised an inert contract: with kappa
+    /// at zero the belief stays at zero and _applyOffset returns on its first line, so
+    /// every invariant holds against a hook whose offset path is `return 0;`.
+    uint256 public ghostMaxKappa;
+    uint256 public ghostMaxBelief;
+
+    uint256 public swapCount;
+    uint256 public revertCount;
+
+    /// Every handler entry point increments this. The anti-vacuity guard needs to tell a
+    /// full campaign apart from Foundry replaying a single shrunk counterexample, and a
+    /// shrunk sequence may legitimately contain no swaps at all.
+    uint256 public callCount;
+
+    constructor(
+        IPoolManager _manager,
+        VaneHookHarness _hook,
+        PoolSwapTest _swapRouter,
+        PoolModifyLiquidityTest _liquidityRouter,
+        PoolKey memory _poolKey,
+        PoolKey memory _otherKey
+    ) {
+        manager = _manager;
+        hook = _hook;
+        swapRouter = _swapRouter;
+        liquidityRouter = _liquidityRouter;
+        poolKey = _poolKey;
+        otherKey = _otherKey;
+        currency0 = _poolKey.currency0;
+        currency1 = _poolKey.currency1;
+    }
+
+    /// Called after every action that can move the mechanism.
+    function _recordMechanism() internal {
+        uint256 k = hook.kappaOf(poolKey.toId());
+        if (k > ghostMaxKappa) ghostMaxKappa = k;
+
+        int256 d = hook.beliefOf(poolKey.toId());
+        uint256 m = d < 0 ? uint256(-d) : uint256(d);
+        if (m > ghostMaxBelief) ghostMaxBelief = m;
+    }
+
+    function _mintAndApprove() internal {
+        MockERC20(Currency.unwrap(currency0)).mint(address(this), 1_000_000 ether);
+        MockERC20(Currency.unwrap(currency1)).mint(address(this), 1_000_000 ether);
+        MockERC20(Currency.unwrap(currency0)).approve(address(swapRouter), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
+        MockERC20(Currency.unwrap(currency0)).approve(address(liquidityRouter), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(liquidityRouter), type(uint256).max);
+        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+    }
+
+    /// A swap over nine orders of magnitude, either direction, either exactness mode, and
+    /// occasionally with the price limit pinned next to spot so almost nothing executes.
+    function swap(uint256 rawAmount, bool zeroForOne, bool exactInput, uint8 limitMode) external {
+        callCount++;
+        _mintAndApprove();
+
+        uint256 amount = bound(rawAmount, 1, 500_000 ether);
+        int256 amountSpecified = exactInput ? -int256(amount) : int256(amount);
+
+        uint160 limit;
+        if (limitMode % 4 == 0) {
+            (uint160 spot,,,) = _slot0();
+            // One wei from spot: the shape of the phantom-notional drain.
+            limit = zeroForOne ? spot - 1 : spot + 1;
+        } else {
+            limit = zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
+        }
+
+        swapCount++;
+        try swapRouter.swap(
+            poolKey,
+            SwapParams({zeroForOne: zeroForOne, amountSpecified: amountSpecified, sqrtPriceLimitX96: limit}),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
+        ) returns (
+            BalanceDelta delta
+        ) {
+            ghostNotional += _realized(delta);
+            _recordNotional(poolKey, delta);
+            _recordMechanism();
+        } catch {
+            // A swap may legitimately fail on liquidity or price limits. What must never
+            // happen is the HOOK reverting, which the invariants check separately via the
+            // pool remaining usable.
+            revertCount++;
+        }
+    }
+
+    function rollBlocks(uint8 rawBlocks) external {
+        callCount++;
+        vm.roll(block.number + bound(uint256(rawBlocks), 1, 64));
+    }
+
+    function addLiquidity(uint128 rawLiquidity) external {
+        callCount++;
+        _mintAndApprove();
+        uint256 liq = bound(uint256(rawLiquidity), 1e15, 100_000 ether);
+        try liquidityRouter.modifyLiquidity(poolKey, ModifyLiquidityParams(-60000, 60000, int256(liq), 0), "") {}
+            catch {}
+    }
+
+    function removeLiquidity(uint128 rawLiquidity) external {
+        callCount++;
+        uint256 liq = bound(uint256(rawLiquidity), 1e15, 50_000 ether);
+        try liquidityRouter.modifyLiquidity(poolKey, ModifyLiquidityParams(-60000, 60000, -int256(liq), 0), "") {}
+            catch {}
+    }
+
+    function fundReserve(uint128 rawAmount, bool which) external {
+        callCount++;
+        _mintAndApprove();
+        uint256 amount = bound(uint256(rawAmount), 1, 10_000 ether);
+        Currency c = which ? currency0 : currency1;
+        try hook.fundReserve(c, amount) {
+            if (which) ghostFunded0 += amount;
+            else ghostFunded1 += amount;
+        } catch {}
+    }
+
+    function withdrawReserve(uint128 rawAmount, bool which) external {
+        callCount++;
+        Currency c = which ? currency0 : currency1;
+        uint256 held = hook.reserveOf(c);
+        if (held == 0) return;
+        uint256 amount = bound(uint256(rawAmount), 1, held);
+        try hook.withdrawReserve(c, amount, address(this)) {
+            if (which) ghostWithdrawn0 += amount;
+            else ghostWithdrawn1 += amount;
+        } catch {}
+    }
+
+    /// Trades the second pool so cross-pool isolation is exercised under real traffic
+    /// rather than against an untouched pool.
+    function swapOtherPool(uint128 rawAmount, bool zeroForOne) external {
+        callCount++;
+        _mintAndApprove();
+        uint256 amount = bound(uint256(rawAmount), 1e12, 100 ether);
+        try swapRouter.swap(
+            otherKey,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(amount),
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
+        ) returns (
+            BalanceDelta delta
+        ) {
+            ghostNotional += _realized(delta);
+            _recordNotional(otherKey, delta);
+            _recordMechanism();
+        } catch {}
+    }
+
+    function _recordNotional(PoolKey memory key, BalanceDelta delta) internal {
+        int128 a0 = delta.amount0();
+        int128 a1 = delta.amount1();
+        uint256 m0 = uint256(uint128(a0 < 0 ? -a0 : a0));
+        uint256 m1 = uint256(uint128(a1 < 0 ? -a1 : a1));
+
+        // The hook converts at the lower of the block's opening tick and the slow average of
+        // earlier openings when it collects, so the largest currency0 amount it can size an
+        // offset from is the currency1 leg converted at that lower tick.
+        int256 refTick = int256(hook.poolState(key.toId()).lastTick);
+        int256 avgFloor = hook.openTickAverageOf(key.toId()) >> 3;
+        if (avgFloor < refTick) refTick = avgFloor;
+        uint160 sqrtOpen = TickMath.getSqrtPriceAtTick(int24(refTick));
+        uint256 m1In0 = FullMath.mulDiv(FullMath.mulDiv(m1, FixedPoint96.Q96, sqrtOpen), FixedPoint96.Q96, sqrtOpen);
+
+        ghostNotional0 += m0 > m1In0 ? m0 : m1In0;
+        ghostNotional1 += m1;
+    }
+
+    /// The larger leg of a realized swap, which bounds whichever side an offset was
+    /// computed from.
+    function _realized(BalanceDelta delta) internal pure returns (uint256) {
+        int128 a0 = delta.amount0();
+        int128 a1 = delta.amount1();
+        uint256 m0 = uint256(uint128(a0 < 0 ? -a0 : a0));
+        uint256 m1 = uint256(uint128(a1 < 0 ? -a1 : a1));
+        return m0 > m1 ? m0 : m1;
+    }
+
+    function _slot0() internal view returns (uint160, int24, uint24, uint24) {
+        bytes32 slot = keccak256(abi.encode(poolKey.toId(), uint256(6)));
+        bytes32 data = manager.extsload(slot);
+        uint160 sqrtPriceX96 = uint160(uint256(data));
+        int24 tick = int24(uint24(uint256(data) >> 160));
+        return (sqrtPriceX96, tick, 0, 0);
+    }
+
+    receive() external payable {}
+}

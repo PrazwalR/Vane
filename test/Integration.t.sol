@@ -1,0 +1,599 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.26;
+
+import {Test, console2} from "forge-std/Test.sol";
+import {Deployers} from "v4-core-test/utils/Deployers.sol";
+import {IHooks} from "v4-core/interfaces/IHooks.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
+import {Currency} from "v4-core/types/Currency.sol";
+import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+
+import {VaneHook} from "../src/VaneHook.sol";
+import {VaneHookHarness} from "./utils/VaneHookHarness.sol";
+import {Fixtures} from "./utils/Fixtures.sol";
+import {GasGuard} from "./utils/GasGuard.sol";
+import {PoolState, PoolStateAux} from "../src/libraries/PoolStateLib.sol";
+import {DepthLib} from "../src/libraries/DepthLib.sol";
+import {KappaLib} from "../src/libraries/KappaLib.sol";
+import {HorizonVariance} from "../src/libraries/HorizonVariance.sol";
+import {FlowVariance} from "../src/libraries/FlowVariance.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+
+contract IntegrationTest is Test, Deployers {
+    using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
+
+    VaneHookHarness internal hook;
+    PoolKey internal vaneKey;
+    PoolKey internal plainKey;
+    PoolId internal id;
+
+    /// Read from the shipped configuration rather than restated, so a recalibrated horizon
+    /// cannot leave these tests timing checkpoints against the wrong one.
+    uint16 internal HORIZON_K = Fixtures.config().horizonK;
+
+    /// Set from a measurement with about 1% headroom, so a regression fails. See
+    /// test_Gas_WorstCaseCheckpointWithActiveBelief for what it measures.
+    uint256 internal constant GAS_WORST_CASE_BOUND = 59_300;
+    /// The budget itself, not a measurement: the costliest swap the hook allows when it has a
+    /// choice must fit it.
+    uint256 internal constant GAS_PAID_OPENING_BOUND = 45_000;
+
+    function setUp() public {
+        deployFreshManagerAndRouters();
+        deployMintAndApprove2Currencies();
+
+        uint160 flags = uint160(
+            Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
+                | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+        );
+        address hookAddr = address(flags ^ (0x8888 << 144));
+        deployCodeTo(
+            "VaneHookHarness.sol:VaneHookHarness", abi.encode(manager, Fixtures.config(), address(this)), hookAddr
+        );
+        hook = VaneHookHarness(hookAddr);
+
+        vaneKey = PoolKey(currency0, currency1, 3000, 60, IHooks(hookAddr));
+        id = vaneKey.toId();
+        hook.allowPool(vaneKey);
+        manager.initialize(vaneKey, SQRT_PRICE_1_1);
+
+        modifyLiquidityRouter.modifyLiquidity(vaneKey, ModifyLiquidityParams(-60000, 60000, 5000 ether, 0), "");
+
+        plainKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(0)));
+        manager.initialize(plainKey, SQRT_PRICE_1_1);
+        modifyLiquidityRouter.modifyLiquidity(plainKey, ModifyLiquidityParams(-60000, 60000, 5000 ether, 0), "");
+
+        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+        hook.fundReserve(currency0, 1000 ether);
+        hook.fundReserve(currency1, 1000 ether);
+    }
+
+    function _swap(bool zeroForOne, int256 amount) internal {
+        swapRouter.swap(
+            vaneKey,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: amount,
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
+        );
+    }
+
+    function _swapOn(PoolKey memory key, bool zeroForOne, int256 amount) internal {
+        swapRouter.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: amount,
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
+        );
+    }
+
+    function test_Init_SeedsTickBaselines() public view {
+        PoolState memory s = hook.poolState(id);
+        PoolStateAux memory a = hook.poolStateAux(id);
+
+        assertEq(s.lastBlock, uint32(block.number), "lastBlock must be seeded");
+        assertEq(a.checkpointBlock, uint32(block.number), "checkpointBlock must be seeded");
+        assertEq(s.lastTick, a.checkpointTick, "both tick baselines start equal");
+    }
+
+    function test_Sampling_IsOncePerBlockNotPerSwap() public {
+        _swap(true, -1 ether);
+        _swap(true, -1 ether);
+        _swap(true, -1 ether);
+
+        PoolState memory s = hook.poolState(id);
+        PoolStateAux memory a = hook.poolStateAux(id);
+
+        assertEq(s.varOneX32, 0, "variance must not update inside a block");
+        assertLt(a.flowAccum, 0, "flow must accumulate for a sell");
+
+        uint32 blockBefore = s.lastBlock;
+        int64 threeSwaps = a.flowAccum;
+        vm.roll(block.number + 1);
+        _swap(true, -1 ether);
+
+        s = hook.poolState(id);
+        assertGt(s.lastBlock, blockBefore, "block boundary must advance the sample");
+        assertGt(s.varOneX32, 0, "variance must update on the first swap of a new block");
+
+        // The block rolls in beforeSwap, before the new block's first swap executes, so the
+        // accumulator now holds that one swap and nothing of the previous block. It used to
+        // roll afterwards, which folded this swap into the previous block's sample.
+        int64 oneSwap = hook.poolStateAux(id).flowAccum;
+        assertLt(oneSwap, 0, "the new block's own swap is in its own window");
+        assertGt(oneSwap, threeSwaps / 2, "and the previous block's flow is not");
+    }
+
+    function _makeDeep() internal {
+        modifyLiquidityRouter.modifyLiquidity(vaneKey, ModifyLiquidityParams(-60000, 60000, 95_000 ether, 0), "");
+    }
+
+    function test_Checkpoint_SetsKappaFromPoolState() public {
+        assertEq(hook.kappaOf(id), 0, "kappa starts at zero");
+        _makeDeep();
+
+        for (uint256 i = 0; i < 400; i++) {
+            vm.roll(block.number + 1);
+            _swap((i / 20) % 2 == 0, -5 ether);
+            _swap((i / 20) % 2 == 0, -5 ether);
+        }
+
+        PoolStateAux memory a = hook.poolStateAux(id);
+        console2.log("kappa after horizon (Q64.64):", a.kappaX64);
+        console2.log("varK  (Q32.32):", a.varKX32);
+        console2.log("varOne(Q32.32):", hook.poolState(id).varOneX32);
+
+        assertGt(a.varKX32, 0, "horizon variance must be populated by a trending price");
+
+        assertGt(a.checkpointBlock, 1, "checkpoint must have advanced past its seed");
+        assertGt(a.kappaX64, 0, "kappa must be set from real pool state");
+        assertLe(a.kappaX64, uint64(uint256(1 << 64) / 1000), "kappa must respect its cap");
+    }
+
+    function test_Diagnostic_KappaInputs() public {
+        _makeDeep();
+
+        for (uint256 i = 0; i < 400; i++) {
+            vm.roll(block.number + 1);
+            _swap((i / 20) % 2 == 0, -5 ether);
+            _swap((i / 20) % 2 == 0, -5 ether);
+        }
+
+        PoolState memory st = hook.poolState(id);
+        PoolStateAux memory a = hook.poolStateAux(id);
+
+        (uint160 sqrtP,,,) = manager.getSlot0(id);
+        uint256 depth = DepthLib.depthX64(manager.getLiquidity(id), sqrtP, 1e12);
+        uint256 sigma = HorizonVariance.sigmaX64(a.varKX32, HORIZON_K);
+        uint256 noise = FlowVariance.noiseScaleX64(st.flowVarUnitsSq);
+
+        console2.log("liquidity        :", manager.getLiquidity(id));
+        console2.log("depth   (Q64.64) :", depth);
+        console2.log("varK    (Q32.32) :", a.varKX32);
+        console2.log("sigma   (Q64.64) :", sigma);
+        console2.log("flowVar (raw)    :", st.flowVarUnitsSq);
+        console2.log("noise U (Q64.64) :", noise);
+        console2.log("lambda_amm       :", KappaLib.lambdaAmmX64(depth));
+        console2.log("lambda_star      :", KappaLib.lambdaStarX64(sigma, noise));
+        console2.log("D* (Q64.64)      :", DepthLib.targetDepthX64(noise, sigma));
+    }
+
+    function test_Kappa_ShallowPoolNeedsNoCorrection() public {
+        for (uint256 i = 0; i <= HORIZON_K; i++) {
+            vm.roll(block.number + 1);
+            _swap(true, -5 ether);
+        }
+
+        assertEq(hook.kappaOf(id), 0, "an over-reacting pool must not be corrected");
+    }
+
+    function test_Checkpoint_FlatPriceLeavesKappaAtZero() public {
+        for (uint256 i = 0; i <= HORIZON_K; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -0.5 ether);
+        }
+
+        PoolStateAux memory a = hook.poolStateAux(id);
+        console2.log("varK on an oscillating price:", a.varKX32);
+        console2.log("kappa on an oscillating price:", a.kappaX64);
+
+        assertGt(hook.poolState(id).varOneX32, 0, "per-block variance still registers the moves");
+        assertEq(a.kappaX64, 0, "no horizon move means no fundamental volatility to price");
+    }
+
+    function test_Checkpoint_LongGapDoesNotInflateKappa() public {
+        for (uint256 i = 0; i < HORIZON_K; i++) {
+            vm.roll(block.number + 1);
+            _swap(true, -5 ether);
+        }
+        vm.roll(block.number + 1);
+        _swap(true, -5 ether);
+        uint256 kappaDense = hook.kappaOf(id);
+
+        setUp();
+        for (uint256 i = 0; i < HORIZON_K; i++) {
+            vm.roll(block.number + 1);
+            _swap(true, -5 ether);
+        }
+        vm.roll(block.number + 100);
+        _swap(true, -5 ether);
+        uint256 kappaSparse = hook.kappaOf(id);
+
+        console2.log("kappa, checkpoint at K blocks :", kappaDense);
+        console2.log("kappa, checkpoint after a gap :", kappaSparse);
+
+        assertLe(kappaSparse, kappaDense, "a long gap must not inflate kappa");
+    }
+
+    function test_Exploit_LongIdleThenViolentMoveDoesNotBrickPool() public {
+        _swap(true, -1 ether);
+
+        vm.roll(block.number + 5000);
+        _swap(true, -400 ether);
+
+        vm.roll(block.number + 1);
+        _swap(false, -1 ether);
+        vm.roll(block.number + 1);
+        _swap(true, -1 ether);
+
+        assertGt(hook.poolState(id).varOneX32, 0, "estimator must survive the excursion");
+    }
+
+    function test_Kappa_UsesNumeraireUnitsNotFlowUnits() public {
+        _makeDeep();
+        for (uint256 i = 0; i <= HORIZON_K; i++) {
+            vm.roll(block.number + 1);
+            _swap(true, -5 ether);
+        }
+
+        uint256 kappa = hook.kappaOf(id);
+        uint64 kappaMax = uint64(uint256(1 << 64) / 1000);
+
+        console2.log("kappa:", kappa);
+        console2.log("kappa cap:", kappaMax);
+
+        assertLt(kappa, kappaMax / 2, "kappa near its cap indicates a scaling error");
+    }
+
+    /// A checkpoint never runs on a swap that may be paid while it can still wait. It runs on
+    /// the next opening swap that runs with the belief instead.
+    function test_Checkpoint_WaitsPastAPayingSwap() public {
+        // Small enough that one 1-ether swap walks the belief by 0.1%, so its sign holds.
+        hook.setKappa(vaneKey, uint64(uint256(1 << 64) / 1_000_000_000));
+        hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 200);
+        uint32 checkpoint = hook.poolStateAux(id).checkpointBlock;
+
+        // Due, but this opening swap sells into a positive belief, so it may be paid.
+        vm.roll(uint256(checkpoint) + HORIZON_K + 1);
+        _swap(true, -1 ether);
+        assertEq(hook.poolStateAux(id).checkpointBlock, checkpoint, "a paying swap must not run the checkpoint");
+
+        // The next block opens with a buy, which runs with the belief: now it runs.
+        vm.roll(block.number + 1);
+        _swap(false, -1 ether);
+        assertEq(hook.poolStateAux(id).checkpointBlock, uint32(block.number), "the next non-paying opening runs it");
+    }
+
+    /// The wait is bounded, so keeping every opening swap on the paying side cannot freeze
+    /// the gain: past one extra horizon the checkpoint runs on a paying swap too.
+    function test_Checkpoint_DeferralIsBounded() public {
+        // Small enough that one 1-ether swap walks the belief by 0.1%, so its sign holds.
+        hook.setKappa(vaneKey, uint64(uint256(1 << 64) / 1_000_000_000));
+        uint32 checkpoint = hook.poolStateAux(id).checkpointBlock;
+
+        // Keep the belief positive and open every block by selling into it.
+        for (uint256 b = 1; b <= 2 * HORIZON_K; b++) {
+            hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 200);
+            vm.roll(uint256(checkpoint) + b);
+            _swap(true, -1 ether);
+            if (b < 2 * HORIZON_K) {
+                assertEq(hook.poolStateAux(id).checkpointBlock, checkpoint, "deferred while the bound allows");
+            }
+        }
+        assertEq(
+            hook.poolStateAux(id).checkpointBlock,
+            uint32(block.number),
+            "at twice the horizon it runs regardless of the swap's side"
+        );
+    }
+
+    function test_Belief_EmergesFromOneSidedFlow() public {
+        for (uint256 i = 0; i <= HORIZON_K; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -0.5 ether);
+        }
+
+        hook.setKappa(vaneKey, uint64(uint256(1 << 64) / 1_000_000));
+
+        int256 beliefBefore = hook.beliefOf(id);
+
+        for (uint256 i = 0; i < 10; i++) {
+            vm.roll(block.number + 1);
+            _swap(false, -2 ether);
+        }
+
+        int256 beliefAfter = hook.beliefOf(id);
+        console2.log("belief before one-sided buying:", beliefBefore);
+        console2.log("belief after  one-sided buying:", beliefAfter);
+
+        assertGt(beliefAfter, beliefBefore, "sustained buying must raise the belief");
+    }
+
+    function test_Belief_SignFollowsFlowDirection() public {
+        hook.setKappa(vaneKey, uint64(uint256(1 << 64) / 1_000_000));
+
+        for (uint256 i = 0; i < 10; i++) {
+            vm.roll(block.number + 1);
+            _swap(true, -2 ether);
+        }
+
+        int256 belief = hook.beliefOf(id);
+        console2.log("belief after one-sided selling:", belief);
+        assertLt(belief, 0, "sustained selling must drive the belief negative");
+    }
+
+    function test_Belief_DecaysWithoutFlow() public {
+        hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 200);
+        int256 start = hook.beliefOf(id);
+
+        for (uint256 i = 0; i < 15; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -1000 wei);
+        }
+
+        int256 ended = hook.beliefOf(id);
+        console2.log("belief start:", start);
+        console2.log("belief after decay:", ended);
+
+        assertLt(ended, start, "belief must decay toward zero without supporting flow");
+        assertGe(ended, 0, "decay must not overshoot through zero");
+    }
+
+    function test_Reserve_EmptyReserveDisablesBeliefWithoutReverting() public {
+        hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 100);
+
+        vm.startPrank(address(hook));
+        manager.transfer(address(1), currency0.toId(), hook.reserveOf(currency0));
+        manager.transfer(address(1), currency1.toId(), hook.reserveOf(currency1));
+        vm.stopPrank();
+        assertEq(hook.reserveOf(currency0), 0, "reserve must be empty");
+
+        uint256 before0 = currency0.balanceOfSelf();
+        _swap(true, -1 ether);
+        assertLt(currency0.balanceOfSelf(), before0, "swap must still execute");
+    }
+
+    function test_Reserve_PartialFundingScalesBelief() public {
+        hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 100);
+
+        vm.startPrank(address(hook));
+        manager.transfer(address(1), currency0.toId(), hook.reserveOf(currency0) - 10 ether);
+        vm.stopPrank();
+        assertEq(hook.reserveOf(currency0), 10 ether, "reserve must be the claim balance");
+        assertEq(hook.targetFor(vaneKey, currency0), 100 ether, "target comes from config default");
+
+        // The offset settles in the UNSPECIFIED currency, so a sell of currency0 is
+        // backed by the currency1 reserve. Scale that one down instead.
+        vm.startPrank(address(hook));
+        manager.transfer(address(1), currency1.toId(), hook.reserveOf(currency1) - 10 ether);
+        vm.stopPrank();
+
+        vm.expectEmit(true, false, false, true, address(hook));
+        emit VaneHook.BeliefScaled(id, 10 ether, 100 ether);
+        _swap(true, -1 ether);
+    }
+
+    function test_Reserve_TargetOverrideIsRespected() public {
+        assertEq(hook.targetFor(vaneKey, currency0), 100 ether, "default applies when unset");
+        hook.setReserveTarget(vaneKey, currency0, 5 ether);
+        assertApproxEqRel(hook.targetFor(vaneKey, currency0), 5 ether, 0.00002e18, "override must take effect");
+        assertEq(hook.targetFor(vaneKey, currency1), 100 ether, "and only for the currency it names");
+    }
+
+    function test_NoCrossPoolContamination_UnderRealFlow() public {
+        PoolKey memory second = PoolKey(currency0, currency1, 500, 10, IHooks(address(hook)));
+        hook.allowPool(second);
+        manager.initialize(second, SQRT_PRICE_1_1);
+        modifyLiquidityRouter.modifyLiquidity(second, ModifyLiquidityParams(-60000, 60000, 5000 ether, 0), "");
+
+        hook.setKappa(vaneKey, uint64(uint256(1 << 64) / 1_000_000));
+
+        for (uint256 i = 0; i < 8; i++) {
+            vm.roll(block.number + 1);
+            _swap(false, -2 ether);
+        }
+
+        assertGt(hook.beliefOf(id), 0, "traded pool must develop a belief");
+        assertEq(hook.beliefOf(second.toId()), 0, "untraded pool must be untouched");
+        assertEq(hook.poolState(second.toId()).varOneX32, 0, "untraded pool variance untouched");
+    }
+
+    function testFuzz_NeverRevertsAcrossBlocks(uint8 rawSwaps, uint128 rawAmount, bool startDirection) public {
+        uint256 swaps = bound(uint256(rawSwaps), 1, 40);
+        uint256 amount = bound(uint256(rawAmount), 1e6, 20 ether);
+
+        for (uint256 i = 0; i < swaps; i++) {
+            vm.roll(block.number + 1);
+            bool dir = (i % 2 == 0) == startDirection;
+            try swapRouter.swap(
+                vaneKey,
+                SwapParams({
+                    zeroForOne: dir,
+                    amountSpecified: -int256(amount),
+                    sqrtPriceLimitX96: dir ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+                }),
+                PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+                ""
+            ) {}
+            catch {
+                fail();
+            }
+        }
+    }
+
+    /// forge-config: default.isolate = true
+    /// The opening swap of an ordinary block: the rollover samples, no checkpoint is due.
+    /// Measured one block after the pool's first checkpoint, so neither that checkpoint's
+    /// one-time storage writes nor the next one fall inside it; it used to be measured
+    /// four blocks in, which a five-block horizon turned into the pool's first checkpoint.
+    function test_Gas_NewBlockSamplingPath() public {
+        for (uint256 i = 0; i < uint256(HORIZON_K) + 1; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -1 ether);
+            _swapOn(plainKey, i % 2 == 0, -1 ether);
+        }
+        vm.roll(block.number + 1);
+        assertLt(block.number - hook.poolStateAux(id).checkpointBlock, HORIZON_K, "precondition: no checkpoint is due");
+
+        uint256 beforePlain = gasleft();
+        _swapOn(plainKey, true, -1 ether);
+        uint256 plainGas = beforePlain - gasleft();
+
+        uint256 before = gasleft();
+        _swap(true, -1 ether);
+        uint256 used = before - gasleft() - plainGas;
+
+        console2.log("marginal hook cost, new-block sampling path:", used);
+
+        if (GasGuard.assertionsEnabled()) {
+            assertLt(used, 45_000, "new-block path must fit the gas budget");
+        }
+    }
+
+    /// Builds two horizons of history on both pools, then opens a block `sinceCheckpoint`
+    /// blocks after the hook's last checkpoint with a swap that sells into a positive
+    /// belief, which the hook pays. Returns the hook's marginal cost for that swap.
+    ///
+    /// Measured past the pool's first checkpoint, against a control pool with identical
+    /// liquidity. The first checkpoint takes a cheaper branch, because depth is unseeded and
+    /// the gain short-circuits to zero, and it used to also pay a one-time zero-to-nonzero
+    /// write of the checkpoint liquidity: 20,000 gas that never recurs. The control used to
+    /// carry twice the liquidity of the hook's pool, so the two curves did not do the same
+    /// work. And every gas test runs isolated, one transaction per call: in one long test
+    /// transaction every slot the history touched is warm, which understated the cost of
+    /// the opening swap of a block by almost half.
+    function _paidOpeningSwap(uint256 sinceCheckpoint) internal returns (uint256) {
+        for (uint256 i = 0; i < 2 * HORIZON_K - 1; i++) {
+            vm.roll(block.number + 1);
+            _swap(true, -5 ether);
+            _swapOn(plainKey, true, -5 ether);
+        }
+
+        hook.setBelief(vaneKey, int256(uint256(1 << 64)) / 100);
+        vm.roll(uint256(hook.poolStateAux(id).checkpointBlock) + sinceCheckpoint);
+
+        uint256 beforePlain = gasleft();
+        _swapOn(plainKey, true, -1 ether);
+        uint256 plainGas = beforePlain - gasleft();
+
+        uint256 beforeVane = gasleft();
+        _swap(true, -1 ether);
+        uint256 vaneGas = beforeVane - gasleft();
+
+        console2.log("plain pool, same history:", plainGas);
+        console2.log("vane pool:", vaneGas);
+        console2.log("marginal hook cost:", vaneGas - plainGas);
+        return vaneGas - plainGas;
+    }
+
+    /// The most expensive swap the hook allows when it has a choice: the opening swap of a
+    /// block, with a checkpoint due, paid out of an active belief. The checkpoint waits for
+    /// a later block, so this pays for the rollover and the payout but not the checkpoint.
+    /// forge-config: default.isolate = true
+    function test_Gas_PaidOpeningSwapDefersTheCheckpoint() public {
+        uint32 checkpoint;
+        uint256 used = _paidOpeningSwap(HORIZON_K);
+        checkpoint = hook.poolStateAux(id).checkpointBlock;
+        assertLt(uint256(checkpoint), block.number, "precondition: the checkpoint was deferred");
+        if (GasGuard.assertionsEnabled()) {
+            assertLt(used, GAS_PAID_OPENING_BOUND, "paid opening swap must stay within its recorded bound");
+        }
+    }
+
+    /// The absolute worst case: a checkpoint that has waited as long as it may, run on a
+    /// swap that is also paid. Reachable only by opening every block for an extra horizon
+    /// with a swap on the paying side, which means keeping a belief alive against the walk
+    /// that unwinds it, and the swap that triggers it pays for its own forcing.
+    /// forge-config: default.isolate = true
+    function test_Gas_WorstCaseCheckpointWithActiveBelief() public {
+        uint256 used = _paidOpeningSwap(2 * uint256(HORIZON_K));
+        assertEq(hook.poolStateAux(id).checkpointBlock, uint32(block.number), "precondition: the checkpoint ran");
+        if (GasGuard.assertionsEnabled()) {
+            assertLt(used, GAS_WORST_CASE_BOUND, "worst case must stay within its recorded bound");
+        }
+    }
+
+    /// forge-config: default.isolate = true
+    function test_Gas_AttributionAtIdenticalState() public {
+        for (uint256 i = 0; i < HORIZON_K - 1; i++) {
+            vm.roll(block.number + 1);
+            _swap(true, -5 ether);
+        }
+        vm.roll(block.number + 1);
+
+        uint256 snap = vm.snapshotState();
+
+        uint256 b1 = gasleft();
+        _swap(true, -1 ether);
+        uint256 checkpointOnly = b1 - gasleft();
+
+        vm.revertToState(snap);
+
+        // A NEGATIVE belief, so this sell runs with it and the hook collects. A belief this
+        // sell would be paid out of makes the checkpoint wait (see VaneHook._horizonDue),
+        // and the two arms would no longer be doing the same checkpoint.
+        hook.setBelief(vaneKey, -int256(uint256(1 << 64)) / 100);
+        uint256 b2 = gasleft();
+        _swap(true, -1 ether);
+        uint256 checkpointPlusSettle = b2 - gasleft();
+        assertEq(hook.poolStateAux(id).checkpointBlock, uint32(block.number), "both arms run the checkpoint");
+
+        console2.log("checkpoint only          :", checkpointOnly);
+        console2.log("checkpoint + settlement  :", checkpointPlusSettle);
+        console2.log("settlement attributable  :", int256(checkpointPlusSettle) - int256(checkpointOnly));
+    }
+
+    /// forge-config: default.isolate = true
+    /// A horizon checkpoint with no belief to pay, at the pool's second checkpoint so the
+    /// first one's one-time writes are behind it. The history used to run exactly one
+    /// horizon, which put the checkpoint inside the history, so this measured an ordinary
+    /// sampling swap under the checkpoint's name and always read within a few gas of it.
+    function test_Gas_HorizonCheckpointPath() public {
+        for (uint256 i = 0; i < 2 * uint256(HORIZON_K) - 1; i++) {
+            vm.roll(block.number + 1);
+            _swap(i % 2 == 0, -0.5 ether);
+            _swapOn(plainKey, i % 2 == 0, -0.5 ether);
+        }
+
+        vm.roll(block.number + 1);
+        uint32 checkpointBefore = hook.poolStateAux(id).checkpointBlock;
+        uint256 beforePlain = gasleft();
+        _swapOn(plainKey, true, -1 ether);
+        uint256 plainGas = beforePlain - gasleft();
+
+        uint256 before = gasleft();
+        _swap(true, -1 ether);
+        uint256 used = before - gasleft() - plainGas;
+
+        assertGt(hook.poolStateAux(id).checkpointBlock, checkpointBefore, "precondition: the checkpoint ran");
+        console2.log("marginal hook cost, horizon checkpoint path:", used);
+        if (GasGuard.assertionsEnabled()) {
+            assertLt(used, 45_000, "checkpoint path must fit the gas budget");
+        }
+    }
+}

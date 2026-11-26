@@ -1,0 +1,23 @@
+/out/
+/cache/
+/lib/
+/broadcast/
+.env
+
+# Working notes stay local. README.md is the only markdown that ships.
+*.md
+!README.md
+!frontend/**/*.md
+
+# Web app
+node_modules/
+.next/
+.vercel/
+skills-lock.json
+sim/target/
+sim/state/*
+!sim/state/.gitkeep
+sim/results/
+lcov.info
+lcov*.info
+audits/

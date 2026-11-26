@@ -1,0 +1,4 @@
+The replay engine writes state.json and manifest.json here, and Foundry's vm.writeFile
+will not create a missing directory. The contents are generated and ignored; this file
+keeps the directory itself in the repository so a fresh clone and CI both have somewhere
+to write.

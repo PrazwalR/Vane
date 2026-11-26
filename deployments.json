@@ -1,0 +1,19 @@
+{
+  "11155111": {
+    "network": "sepolia",
+    "poolManager": "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",
+    "vaneHook": "0xb6aEb564dD04b89D2e6B5861d745cE951e2530c4",
+    "token0": "0x6010599B60CcF158066067653BC673b2980C05B6",
+    "token1": "0xAc42C79DcBfd9e4DcFa800a4bf9cc75dA154BD2f",
+    "swapRouter": "0xec1357f460e8856e7fa5A62Df00D368bb608Fd12",
+    "liquidityRouter": "0x50796c73eF889794488b5B85bEFB86B1D93f0D88",
+    "poolId": "0xa545406676c36c1d53b768e522d4003f541fa0eea25ec54be189f5093ce3b587",
+    "hookFlags": 12484,
+    "fee": 3000,
+    "tickSpacing": 60,
+    "flowUnit": "1000000000000",
+    "liquidity": "50000000000000000000000",
+    "reserve": "5000000000000000000000",
+    "commit": "9f9be6d"
+  }
+}
